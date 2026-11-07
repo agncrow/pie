@@ -1,0 +1,3 @@
+--- The repository's root: each package reaches its siblings through
+--- crow_modules links, as a program that installs them does.
+name = 'pie_repository'

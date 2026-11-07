@@ -1,0 +1,23 @@
+# what crow builds and keeps beside a program
+.crow_build/
+target/
+**/.crow/
+# the logs and data a program run here writes
+*.csv
+*.txt
+*.json
+# the OS and editors
+.DS_Store
+*.swp
+*~
+__pycache__/
+# the book as a site, rendered by docs/book/site.co
+docs/book/crow-site/
+!packages/retrieval/reference/data/*.csv
+!packages/retrieval/reference/expected/*.csv
+!packages/gpt/reference/data/*.csv
+!packages/gpt/reference/data/*.txt
+!packages/gpt/reference/expected/*.csv
+!packages/gpt/reference/expected/*.txt
+!packages/vectors/reference/data/*.csv
+!packages/vectors/reference/expected/*.csv

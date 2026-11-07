@@ -1,0 +1,2 @@
+name = 'gpt'
+deps = map[nn = 'github.com/agncrow/pie/packages/nn@v0.1.0']

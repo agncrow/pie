@@ -1,0 +1,14 @@
+--- pie's stats at work: what describes a series, what relates two, and
+--- the tests.
+use math, stats
+
+x = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+y = [1.0, 3.0, 2.0, 5.0, 4.0, 6.0, 8.0, 9.0]
+log['median `stats.median[x]`, var `stats.var[x]`, std `stats.std[x]`']
+log['90th percentile `stats.percentile[x, 90.0]`']
+log['corr `stats.corr[x, y]`']
+line = stats.linreg[x, y]
+log['line: slope `line[\'slope\']`, intercept `line[\'intercept\']`']
+t = stats.ttest[x, y]
+log['welch t `t[\'t\']`']
+log['fit normal: `stats.fit[x, \'normal\']`']

@@ -1,0 +1,12 @@
+--- pie's nn at work: each activation, each loss and the linear layer.
+use math, nn
+
+x = [[-1.0, 0.5], [2.0, -0.25]]
+log['relu: `nn.relu[x]`']
+log['sigmoid of 0: `flatten[nn.sigmoid[[0.0]]][0]`']
+log['softmax: `nn.softmax[[1.0, 2.0, 3.0]]`']
+log['gelu of 1: `flatten[nn.gelu[[1.0]]][0]`']
+log['mse: `nn.mse[[1.0, 2.0], [1.0, 4.0]]`']
+log['bce: `nn.bce[[0.9, 0.1], [1.0, 0.0]]`']
+log['crossentropy: `nn.crossentropy[[[2.0, 0.0], [0.0, 3.0]], [0.0, 1.0]]`']
+log['linear: `nn.linear[x, [[1.0], [2.0]], [0.5]]`']
