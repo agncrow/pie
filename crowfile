@@ -1,3 +1,5 @@
---- The repository's root: each package reaches its siblings through
---- crow_modules links, as a program that installs them does.
+--- The repository's root: the parity programs and the examples reach the
+--- packages through crow_modules links, as a program that installs them
+--- does.
 name = 'pie_repository'
+deps = map[nn = 'packages/nn', stats = 'packages/stats', models = 'packages/models', optimize = 'packages/optimize', symbolic = 'packages/symbolic', gpt = 'packages/gpt', graph = 'packages/graph', retrieval = 'packages/retrieval', vectors = 'packages/vectors']

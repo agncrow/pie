@@ -1,0 +1,45 @@
+--- pie's nn is written in Crow (packages/nn): both modes call the one
+--- body — a list read as a tensor where the row takes one, a result typed
+--- and shaped as the row says, a gradient through the formulas, and a
+--- misuse stopping with the reason on the line of the call in the program.
+use math, nn
+
+log[nn.relu[[-1.0, 0.5, 2.0]]]
+log[nn.sigmoid[[0.0]]]
+log[nn.softmax[[1.0, 1.0]]]
+log[fmt[nn.gelu[[1.0]][0], decimals = 6]]
+log[nn.mse[[1.0, 2.0], [1.0, 4.0]]]
+log[fmt[nn.bce[[0.9, 0.1], [1.0, 0.0]], decimals = 6]]
+log[fmt[nn.crossentropy[[[2.0, 0.0]], [0.0]], decimals = 6]]
+log[nn.linear[[[1.0, 2.0]], [[1.0], [1.0]], [0.5]]]
+
+--- a matrix keeps its rank through an element-wise formula
+m = [[1.0, -2.0], [3.0, 0.5]]
+for r in nn.relu[m]
+    log[r]
+log[type[nn.sigmoid[m]]]
+log[nn.softmax[[1000.0, 1001.0, 1002.0]]]
+
+--- the gradient of a loss through the formulas, in one run backward
+fn loss[w, b, x, y]
+    p = nn.sigmoid[x * w + b]
+    return nn.bce[flatten[p], y]
+
+x = [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+y = [1.0, 0.0, 1.0]
+grads = grad[loss][[[0.5], [-0.5]], [[0.1]], x, y]
+log[fmt[flatten[grads[0]][0], decimals = 6]]
+log[fmt[flatten[grads[0]][1], decimals = 6]]
+log[fmt[flatten[grads[1]][0], decimals = 6]]
+log[grads[2].shape]
+
+fn scores[w, x, c]
+    return nn.crossentropy[x * w, c] + sum[nn.gelu[x * w]] + max[nn.relu[x * w]]
+
+gc = grad[scores][[[0.5, -0.5, 0.1], [0.2, 0.3, -0.4]], x, [0.0, 2.0, 1.0]]
+log[fmt[flatten[gc[0]][1], decimals = 6]]
+log[fmt[flatten[gc[0]][5], decimals = 6]]
+
+--- a misuse stops on this line, with the formula's own words
+log[nn.crossentropy[[1.0, 2.0, 3.0], [7.0]]]
+log['not reached']
