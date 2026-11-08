@@ -1,0 +1,591 @@
+--- `use nn.lr_scheduler`: PyTorch's torch.optim.lr_scheduler. A schedule
+--- is a function named as PyTorch's class in snake case —
+--- `lr_scheduler.step_lr[opt, 30]` is StepLR(optimizer, 30) — answering the
+--- optimizer with the schedule attached and its first learning rates set,
+--- as PyTorch's constructor sets them. `opt = lr_scheduler.step[opt]` steps
+--- every schedule attached, in the order attached, after `optim.step`, as
+--- PyTorch's loop steps its schedulers: two schedules attached are
+--- PyTorch's ChainedScheduler of the two, and `lr_scheduler.sequential_lr
+--- [opt, milestones]` makes the schedules attached one SequentialLR, the
+--- first until the first milestone, then the next. A plateau schedule
+--- steps on the metric it watches: `lr_scheduler.step_on[opt, loss]`
+--- (ReduceLROnPlateau's step(metrics)). A schedule sets each group's `lr`
+--- (and, where it cycles momentum, its `momentum`, or Adam's `beta1`), so
+--- `optim.hyper[opt, 'lr']` is the learning rate the next step takes;
+--- `lr_scheduler.last_lr[opt]` is PyTorch's get_last_lr(). Every rate is
+--- PyTorch's arithmetic, operation for operation: held_sched.co holds 22
+--- schedules to torch's exactly. PyTorch's T_max, T_0 and T_mult are
+--- `t_max`, `t_0` and `t_mult`.
+use math as m
+use optim
+
+--- a schedule: its form (`step`, `cosine`, …), its numbers (its options
+--- and the counts it keeps), its words (a mode), the milestones it marks,
+--- the lists it keeps a number of per group in (`base`, PyTorch's
+--- base_lrs, …), PyTorch's last_epoch and _step_count, and the function a
+--- lambda schedule multiplies by
+struct Schedule [form, hyper, words, marks, lists, last_epoch, step_count, factor]
+
+--- a schedule's rates: each group's learning rate, and its momentum where
+--- the schedule cycles one (none otherwise)
+struct Rates [lrs, momenta]
+
+fn _once[epoch]
+    return 1.0
+
+fn _schedule[form, hyper, words, marks, factor]
+    return Schedule[form, hyper, words, marks, map[], -1, 0, factor]
+
+--- PyTorch's LRScheduler constructor: each group's initial_lr kept (set
+--- from its lr where none is), the base rates read from them, and the
+--- first step taken
+fn _attached[opt, s0]
+    initial = optim.hyper_or[opt, 'initial_lr', 'lr']
+    o = optim.with_hyper[opt, 'initial_lr', initial]
+    s = s0
+    lists = s.lists
+    lists['base'] = initial
+    s.lists = lists
+    o.schedules = push[o.schedules, s]
+    return _step_one[o, len[o.schedules] - 1, 0.0, -1, true]
+
+--- the key a group's momentum is under: SGD's and RMSprop's `momentum`,
+--- the Adams' `beta1`
+fn _momentum_key[opt]
+    if opt.form eq 'sgd' or opt.form eq 'rmsprop'
+        return 'momentum'
+    if opt.form in ['adam', 'adamw', 'adamax', 'nadam', 'radam']
+        return 'beta1'
+    halt['optimizer must support momentum or beta1 with cycle_momentum option enabled']
+
+fn _each[opt, value]
+    out = []
+    for one in opt.groups
+        out = push[out, float[value]]
+    return out
+
+--- the schedules ------------------------------------------------------------
+
+--- lambda_lr[opt, lr_lambda]: each base rate times lr_lambda[epoch]
+--- (LambdaLR)
+fn lambda_lr[opt, lr_lambda]
+    return _attached[opt, _schedule['lambda', map[], map[], [], lr_lambda]]
+
+--- multiplicative_lr[opt, lr_lambda]: the rate times lr_lambda[epoch] at
+--- every step (MultiplicativeLR)
+fn multiplicative_lr[opt, lr_lambda]
+    return _attached[opt, _schedule['multiplicative', map[], map[], [], lr_lambda]]
+
+--- step_lr[opt, step_size]: the rate times gamma every step_size steps
+--- (StepLR)
+fn step_lr[opt, step_size, gamma = 0.1]
+    return _attached[opt, _schedule['step', map[step_size = float[step_size], gamma = float[gamma]], map[], [], _once]]
+
+--- multi_step_lr[opt, milestones]: the rate times gamma at each milestone,
+--- once for each time the milestone is listed (MultiStepLR)
+fn multi_step_lr[opt, milestones, gamma = 0.1]
+    marks = []
+    for k in milestones
+        marks = push[marks, int[k]]
+    return _attached[opt, _schedule['multi_step', map[gamma = float[gamma]], map[], sort[marks], _once]]
+
+--- constant_lr[opt]: the rate times factor until total_iters steps
+--- (ConstantLR)
+fn constant_lr[opt, factor = 0.3333333333333333, total_iters = 5]
+    if factor gt 1.0 or factor lt 0.0
+        halt['Constant multiplicative factor expected to be between 0 and 1.']
+    return _attached[opt, _schedule['constant', map[factor = float[factor], total_iters = float[total_iters]], map[], [], _once]]
+
+--- linear_lr[opt]: the rate times a factor going from start_factor to
+--- end_factor over total_iters steps (LinearLR)
+fn linear_lr[opt, start_factor = 0.3333333333333333, end_factor = 1.0, total_iters = 5]
+    if start_factor gt 1.0 or start_factor lte 0.0
+        halt['Starting multiplicative factor expected to be greater than 0 and less or equal to 1.']
+    if end_factor gt 1.0 or end_factor lt 0.0
+        halt['Ending multiplicative factor expected to be between 0 and 1.']
+    return _attached[opt, _schedule['linear', map[start_factor = float[start_factor], end_factor = float[end_factor], total_iters = float[total_iters]], map[], [], _once]]
+
+--- exponential_lr[opt, gamma]: the rate times gamma at every step
+--- (ExponentialLR)
+fn exponential_lr[opt, gamma]
+    return _attached[opt, _schedule['exponential', map[gamma = float[gamma]], map[], [], _once]]
+
+--- polynomial_lr[opt]: the rate decayed to 0 over total_iters steps by a
+--- polynomial of the power (PolynomialLR)
+fn polynomial_lr[opt, total_iters = 5, power = 1.0]
+    return _attached[opt, _schedule['polynomial', map[total_iters = float[total_iters], power = float[power]], map[], [], _once]]
+
+--- cosine_annealing_lr[opt, t_max]: the rate annealed to eta_min along a
+--- cosine over t_max steps, and back over the next t_max
+--- (CosineAnnealingLR)
+fn cosine_annealing_lr[opt, t_max, eta_min = 0.0]
+    return _attached[opt, _schedule['cosine', map[t_max = float[t_max], eta_min = float[eta_min]], map[], [], _once]]
+
+--- cosine_annealing_warm_restarts[opt, t_0]: a cosine annealing begun
+--- again after t_0 steps, each run t_mult times the last
+--- (CosineAnnealingWarmRestarts)
+fn cosine_annealing_warm_restarts[opt, t_0, t_mult = 1, eta_min = 0.0]
+    if t_0 lte 0
+        halt['Expected positive integer T_0, but got `t_0`']
+    if t_mult lt 1
+        halt['Expected integer T_mult >= 1, but got `t_mult`']
+    h = map[t_0 = float[t_0], t_i = float[t_0], t_mult = float[t_mult], eta_min = float[eta_min], t_cur = -1.0]
+    return _attached[opt, _schedule['warm_restarts', h, map[], [], _once]]
+
+--- cyclic_lr[opt, base_lr, max_lr]: the rate cycled between base_lr and
+--- max_lr, up over step_size_up steps and down over step_size_down (the
+--- same as up where 0), each cycle as the mode says: `triangular`,
+--- `triangular2` (each cycle half the last) or `exp_range` (scaled by gamma
+--- per step); where cycle_momentum, the momentum cycled the other way
+--- between max_momentum and base_momentum (CyclicLR)
+fn cyclic_lr[opt, base_lr, max_lr, step_size_up = 2000, step_size_down = 0, mode = 'triangular', gamma = 1.0, cycle_momentum = true, base_momentum = 0.8, max_momentum = 0.9]
+    if not (mode in ['triangular', 'triangular2', 'exp_range'])
+        halt['mode is invalid and scale_fn is None']
+    up = float[step_size_up]
+    down = up
+    if step_size_down gt 0
+        down = float[step_size_down]
+    total = up + down
+    bases = _each[opt, base_lr]
+    o = optim.with_hyper[opt, 'lr', bases]
+    lists = map[max_lrs = _each[opt, max_lr]]
+    words = map[mode = mode, momentum_key = '']
+    cycles = 0.0
+    if cycle_momentum
+        key = _momentum_key[opt]
+        words['momentum_key'] = key
+        cycles = 1.0
+        lists['base_momenta'] = _each[opt, base_momentum]
+        lists['max_momenta'] = _each[opt, max_momentum]
+        o = optim.with_hyper[o, key, lists['max_momenta']]
+        o = optim.with_hyper[o, 'max_momentum', lists['max_momenta']]
+        o = optim.with_hyper[o, 'base_momentum', lists['base_momenta']]
+    h = map[total_size = total, step_ratio = up / total, gamma = float[gamma], cycle_momentum = cycles]
+    s = Schedule['cyclic', h, words, [], lists, -1, 0, _once]
+    o = _attached[o, s]
+    at = len[o.schedules] - 1
+    made = o.schedules[at]
+    kept = made.lists
+    kept['base'] = bases
+    made.lists = kept
+    o.schedules[at] = made
+    return o
+
+--- one_cycle_lr[opt, max_lr]: the 1cycle policy: the rate annealed up from
+--- max_lr / div_factor to max_lr over pct_start of the steps, then down to
+--- that over final_div_factor (with three_phase, back to the start first
+--- and then down), the momentum the other way; total_steps, or epochs ×
+--- steps_per_epoch, steps in all (OneCycleLR)
+fn one_cycle_lr[opt, max_lr, total_steps = 0, epochs = 0, steps_per_epoch = 0, pct_start = 0.3, anneal_strategy = 'cos', cycle_momentum = true, base_momentum = 0.85, max_momentum = 0.95, div_factor = 25.0, final_div_factor = 10000.0, three_phase = false]
+    total = total_steps
+    if total_steps lte 0
+        if epochs lte 0 or steps_per_epoch lte 0
+            halt['You must define either total_steps OR (epochs AND steps_per_epoch)']
+        total = epochs * steps_per_epoch
+    if pct_start lt 0.0 or pct_start gt 1.0
+        halt['Expected float between 0 and 1 pct_start, but got `pct_start`']
+    if not (anneal_strategy in ['cos', 'linear'])
+        halt['anneal_strategy must be one of cos or linear, instead got `anneal_strategy`']
+    phase_ends = [pct_start * float[total] - 1.0, float[total] - 1.0]
+    if three_phase
+        phase_ends = [pct_start * float[total] - 1.0, 2.0 * pct_start * float[total] - 2.0, float[total] - 1.0]
+    tops = _each[opt, max_lr]
+    firsts = []
+    lows = []
+    for top in tops
+        firsts = push[firsts, top / div_factor]
+        lows = push[lows, top / div_factor / final_div_factor]
+    o = optim.with_hyper[opt, 'initial_lr', firsts]
+    o = optim.with_hyper[o, 'max_lr', tops]
+    o = optim.with_hyper[o, 'min_lr', lows]
+    words = map[anneal = anneal_strategy, momentum_key = '']
+    cycles = 0.0
+    if cycle_momentum
+        key = _momentum_key[opt]
+        words['momentum_key'] = key
+        cycles = 1.0
+        o = optim.with_hyper[o, key, _each[opt, max_momentum]]
+        o = optim.with_hyper[o, 'max_momentum', _each[opt, max_momentum]]
+        o = optim.with_hyper[o, 'base_momentum', _each[opt, base_momentum]]
+    phases = 2.0
+    if three_phase
+        phases = 3.0
+    h = map[total_steps = float[total], phases = phases, cycle_momentum = cycles]
+    return _attached[o, Schedule['one_cycle', h, words, [], map[ends = phase_ends], -1, 0, _once]]
+
+--- reduce_lr_on_plateau[opt]: the rate times factor once the metric
+--- `step_on` is given has not improved for patience steps — improved
+--- falling in mode `min`, rising in `max`, by a threshold relative to the
+--- best (`rel`) or absolute (`abs`) — then left alone for cooldown steps,
+--- never below min_lr (ReduceLROnPlateau)
+fn reduce_lr_on_plateau[opt, mode = 'min', factor = 0.1, patience = 10, threshold = 0.0001, threshold_mode = 'rel', cooldown = 0, min_lr = 0.0, eps = 0.00000001]
+    if factor gte 1.0
+        halt['Factor should be < 1.0.']
+    if not (mode in ['min', 'max'])
+        halt['mode `mode` is unknown!']
+    if not (threshold_mode in ['rel', 'abs'])
+        halt['threshold mode `threshold_mode` is unknown!']
+    worst = m.inf
+    if mode eq 'max'
+        worst = -m.inf
+    h = map[factor = float[factor], patience = float[patience], threshold = float[threshold], cooldown = float[cooldown], eps = float[eps], best = worst, bad = 0.0, cooling = 0.0]
+    words = map[mode = mode, threshold_mode = threshold_mode]
+    s = Schedule['plateau', h, words, [], map[min_lrs = _each[opt, min_lr]], 0, 0, _once]
+    o = opt
+    o.schedules = push[o.schedules, s]
+    return o
+
+--- sequential_lr[opt, milestones]: the schedules attached as one
+--- SequentialLR: the first until milestones[0], the next until
+--- milestones[1], …, each begun at its epoch 0 (SequentialLR)
+fn sequential_lr[opt, milestones]
+    count = len[opt.schedules]
+    if count lt 1
+        halt['SequentialLR expects at least one scheduler']
+    if len[milestones] ne count - 1
+        halt['Sequential Schedulers expects number of schedulers provided to be one more than the number of milestone points, but got number of schedulers `count` and the number of milestones to be equal to `len[milestones]`']
+    marks = []
+    for k in milestones
+        marks = push[marks, int[k]]
+    o = opt
+    o.milestones = marks
+    o.epoch = 0
+    o = optim.with_hyper[o, 'lr', optim.hyper[o, 'initial_lr']]
+    undone = []
+    for s in o.schedules
+        if s.form eq 'plateau'
+            halt['SequentialLR does not support ReduceLROnPlateau scheduler as it requires additional kwargs to be specified when calling step']
+        back = s
+        back.last_epoch = s.last_epoch - 1
+        undone = push[undone, back]
+    o.schedules = undone
+    return _step_one[o, 0, 0.0, -1, true]
+
+--- the stepping -------------------------------------------------------------
+
+--- step[opt]: every schedule attached stepped once, in the order attached
+--- (each scheduler's step(), after the optimizer's)
+fn step[opt]
+    for s in opt.schedules
+        if s.form eq 'plateau'
+            halt['a plateau schedule steps on the metric it watches: lr_scheduler.step_on[opt, metric]']
+    return _stepped[opt, 0.0]
+
+--- step_on[opt, metric]: every schedule attached stepped once, a plateau
+--- schedule on the metric (ReduceLROnPlateau's step(metrics))
+fn step_on[opt, metric]
+    return _stepped[opt, float[metric]]
+
+fn _stepped[opt, metric]
+    if len[opt.milestones] gt 0
+        o = opt
+        o.epoch = opt.epoch + 1
+        at = _bisect_right[o.milestones, o.epoch]
+        if at gt 0 and o.milestones[at - 1] eq o.epoch
+            return _step_one[o, at, metric, 0, false]
+        return _step_one[o, at, metric, -1, false]
+    o = opt
+    i = 0
+    while i lt len[o.schedules]
+        o = _step_one[o, i, metric, -1, false]
+        i = i + 1
+    return o
+
+--- last_lr[opt]: each group's learning rate (get_last_lr())
+fn last_lr[opt]
+    return optim.hyper[opt, 'lr']
+
+--- how many of the sorted marks are at or before the epoch (bisect_right)
+fn _bisect_right[marks, epoch]
+    n = 0
+    for k in marks
+        if k lte epoch
+            n = n + 1
+    return n
+
+fn _count[marks, epoch]
+    n = 0
+    for k in marks
+        if k eq epoch
+            n = n + 1
+    return n
+
+--- one schedule's step: PyTorch's LRScheduler.step, given an epoch
+--- (`step(epoch)`, its closed form) where epoch is not negative; `initial`
+--- is its constructor's first step
+fn _step_one[opt, i, metric, epoch, initial]
+    s = opt.schedules[i]
+    if s.form eq 'plateau'
+        return _plateau[opt, i, s, metric]
+    if s.form eq 'warm_restarts'
+        return _restarted[opt, i, s, epoch]
+    if initial
+        s.step_count = 0
+    s.step_count = s.step_count + 1
+    closed = false
+    if epoch lt 0
+        s.last_epoch = s.last_epoch + 1
+    else
+        s.last_epoch = epoch
+        closed = s.form in ['step', 'multi_step', 'constant', 'linear', 'exponential', 'polynomial', 'cosine']
+    o = opt
+    o.schedules[i] = s
+    rates = _rates[o, s, initial, closed]
+    if len[rates.momenta] gt 0
+        o = optim.with_hyper[o, s.words['momentum_key'], rates.momenta]
+    return optim.with_hyper[o, 'lr', rates.lrs]
+
+fn _rates[o, s, initial, closed]
+    if s.form eq 'cyclic'
+        return _cyclic[o, s]
+    if s.form eq 'one_cycle'
+        return _one_cycle[o, s]
+    lrs = optim.hyper[o, 'lr']
+    base = s.lists['base']
+    out = []
+    i = 0
+    for lr in lrs
+        out = push[out, _lr_of[s, lr, base[i], initial, closed]]
+        i = i + 1
+    return Rates[out, []]
+
+--- a group's rate at the schedule's epoch, from its rate now and its base
+fn _lr_of[s, lr, b, initial, closed]
+    f = s.form
+    h = s.hyper
+    e = s.last_epoch
+    if f eq 'lambda'
+        return b * s.factor[e]
+    if f eq 'multiplicative'
+        if initial
+            return lr
+        return lr * s.factor[e]
+    if f eq 'step'
+        k = int[h['step_size']]
+        if closed
+            return b * h['gamma'] ^ float[e / k]
+        if e eq 0 or e % k ne 0
+            return lr
+        return lr * h['gamma']
+    if f eq 'multi_step'
+        if closed
+            return b * h['gamma'] ^ float[_bisect_right[s.marks, e]]
+        c = _count[s.marks, e]
+        if c eq 0
+            return lr
+        return lr * h['gamma'] ^ float[c]
+    if f eq 'constant'
+        factor = h['factor']
+        total = int[h['total_iters']]
+        if closed
+            past = 0.0
+            if e gte total
+                past = 1.0
+            return b * (factor + past * (1.0 - factor))
+        if e eq 0
+            return lr * factor
+        if e ne total
+            return lr
+        return lr * (1.0 / factor)
+    if f eq 'linear'
+        sf = h['start_factor']
+        ef = h['end_factor']
+        total = int[h['total_iters']]
+        if closed
+            return b * (sf + (ef - sf) * float[min[total, e]] / float[total])
+        if e eq 0
+            return lr * sf
+        if initial or e gt total
+            return lr
+        return lr * (1.0 + (ef - sf) / (float[total] * sf + float[e - 1] * (ef - sf)))
+    if f eq 'exponential'
+        if closed
+            return b * h['gamma'] ^ float[e]
+        if initial
+            return lr
+        return lr * h['gamma']
+    if f eq 'polynomial'
+        total = int[h['total_iters']]
+        if closed
+            return b * (1.0 - float[min[total, e]] / float[total]) ^ h['power']
+        if initial or e gt total
+            return lr
+        return lr * ((1.0 - float[e] / float[total]) / (1.0 - float[e - 1] / float[total])) ^ h['power']
+    if f eq 'cosine'
+        tm = h['t_max']
+        low = h['eta_min']
+        if closed
+            return low + (b - low) * (1.0 + m.cos[m.pi * float[e] / tm]) / 2.0
+        if initial
+            return lr
+        if s.step_count eq 1 and e gt 0
+            return low + (b - low) * (1.0 + m.cos[float[e] * m.pi / tm]) / 2.0
+        span = int[tm]
+        if (e - 1 - span) % (2 * span) eq 0
+            return lr + (b - low) * (1.0 - m.cos[m.pi / tm]) / 2.0
+        return (1.0 + m.cos[m.pi * float[e] / tm]) / (1.0 + m.cos[m.pi * float[e - 1] / tm]) * (lr - low) + low
+    halt['no schedule `f`']
+
+--- CyclicLR's rates
+fn _cyclic[o, s]
+    h = s.hyper
+    e = float[s.last_epoch]
+    ts = h['total_size']
+    ratio = h['step_ratio']
+    cycle = floor[1.0 + e / ts]
+    x = 1.0 + e / ts - float[cycle]
+    scale = (x - 1.0) / (ratio - 1.0)
+    if x lte ratio
+        scale = x / ratio
+    mode = s.words['mode']
+    by = 1.0
+    if mode eq 'triangular2'
+        by = 1.0 / 2.0 ^ float[cycle - 1]
+    if mode eq 'exp_range'
+        by = h['gamma'] ^ e
+    base = s.lists['base']
+    tops = s.lists['max_lrs']
+    lrs = []
+    i = 0
+    for b in base
+        lrs = push[lrs, b + (tops[i] - b) * scale * by]
+        i = i + 1
+    momenta = []
+    if h['cycle_momentum'] gt 0.0
+        lows = s.lists['base_momenta']
+        highs = s.lists['max_momenta']
+        i = 0
+        for low in lows
+            momenta = push[momenta, highs[i] - (highs[i] - low) * scale * by]
+            i = i + 1
+    return Rates[lrs, momenta]
+
+--- OneCycleLR's rates: each group's from its own initial, max and min rate
+--- and momenta
+fn _one_cycle[o, s]
+    h = s.hyper
+    e = s.last_epoch
+    total = int[h['total_steps']]
+    if e gt total
+        halt['Tried to step `e` times. The specified number of total steps is `total`']
+    phase_ends = s.lists['ends']
+    three = h['phases'] eq 3.0
+    cycles = h['cycle_momentum'] gt 0.0
+    how = s.words['anneal']
+    lrs = []
+    momenta = []
+    for one in o.groups
+        g = one.hyper
+        start = 0.0
+        i = 0
+        done = false
+        while not done
+            stop = phase_ends[i]
+            if float[e] lte stop or i eq len[phase_ends] - 1
+                pct = (float[e] - start) / (stop - start)
+                named = _phase_keys[three, i]
+                lrs = push[lrs, _annealed[how, g[named[0]], g[named[1]], pct]]
+                if cycles
+                    momenta = push[momenta, _annealed[how, g[named[2]], g[named[3]], pct]]
+                done = true
+            else
+                start = stop
+                i = i + 1
+    return Rates[lrs, momenta]
+
+--- a phase's rate from and to, then its momentum from and to
+fn _phase_keys[three, i]
+    if i eq 0
+        return ['initial_lr', 'max_lr', 'max_momentum', 'base_momentum']
+    if three
+        if i eq 1
+            return ['max_lr', 'initial_lr', 'base_momentum', 'max_momentum']
+        return ['initial_lr', 'min_lr', 'max_momentum', 'max_momentum']
+    return ['max_lr', 'min_lr', 'base_momentum', 'max_momentum']
+
+fn _annealed[how, start, stop, pct]
+    if how eq 'cos'
+        out = m.cos[m.pi * pct] + 1.0
+        return stop + (start - stop) / 2.0 * out
+    return (stop - start) * pct + start
+
+--- ReduceLROnPlateau's step
+fn _plateau[opt, i, s0, metric]
+    s = s0
+    h = s.hyper
+    s.last_epoch = s.last_epoch + 1
+    if _better[s, metric, h['best']]
+        h['best'] = metric
+        h['bad'] = 0.0
+    else
+        h['bad'] = h['bad'] + 1.0
+    if h['cooling'] gt 0.0
+        h['cooling'] = h['cooling'] - 1.0
+        h['bad'] = 0.0
+    o = opt
+    if h['bad'] gt h['patience']
+        lows = s.lists['min_lrs']
+        lrs = []
+        k = 0
+        for old in optim.hyper[o, 'lr']
+            new = old * h['factor']
+            if lows[k] gt new
+                new = lows[k]
+            if old - new gt h['eps']
+                lrs = push[lrs, new]
+            else
+                lrs = push[lrs, old]
+            k = k + 1
+        o = optim.with_hyper[o, 'lr', lrs]
+        h['cooling'] = h['cooldown']
+        h['bad'] = 0.0
+    s.hyper = h
+    o.schedules[i] = s
+    return o
+
+fn _better[s, a, best]
+    t = s.hyper['threshold']
+    rel = s.words['threshold_mode'] eq 'rel'
+    if s.words['mode'] eq 'min'
+        if rel
+            return a lt best * (1.0 - t)
+        return a lt best - t
+    if rel
+        return a gt best * (t + 1.0)
+    return a gt best + t
+
+--- CosineAnnealingWarmRestarts's step
+fn _restarted[opt, i, s0, epoch]
+    s = s0
+    h = s.hyper
+    e = float[epoch]
+    if epoch lt 0 and s.last_epoch lt 0
+        e = 0.0
+    if e lt 0.0
+        e = float[s.last_epoch + 1]
+        h['t_cur'] = h['t_cur'] + 1.0
+        if h['t_cur'] gte h['t_i']
+            h['t_cur'] = h['t_cur'] - h['t_i'] * float[floor[h['t_cur'] / h['t_i']]]
+            h['t_i'] = h['t_i'] * h['t_mult']
+    else
+        t0 = h['t_0']
+        tm = h['t_mult']
+        if e gte t0
+            if tm eq 1.0
+                h['t_cur'] = e - t0 * float[floor[e / t0]]
+            else
+                n = int[m.ln[e / t0 * (tm - 1.0) + 1.0] / m.ln[tm]]
+                h['t_cur'] = e - t0 * (tm ^ float[n] - 1.0) / (tm - 1.0)
+                h['t_i'] = t0 * tm ^ float[n]
+        else
+            h['t_i'] = t0
+            h['t_cur'] = e
+    s.last_epoch = floor[e]
+    s.hyper = h
+    o = opt
+    o.schedules[i] = s
+    low = h['eta_min']
+    lrs = []
+    for b in s.lists['base']
+        lrs = push[lrs, low + (b - low) * (1.0 + m.cos[m.pi * h['t_cur'] / h['t_i']]) / 2.0]
+    return optim.with_hyper[o, 'lr', lrs]

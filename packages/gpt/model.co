@@ -13,7 +13,8 @@
 --- The inputs come first: X (tokens × vocab, one-hot), P (tokens × 16, the
 --- positions one-hot), the causal mask (tokens × tokens, 0 or -1e9) and
 --- the targets (tokens, ints); their gradients are zeros.
-use math, nn
+use math
+use nn.functional as F
 
 --- the layer norm of each row (eps 1e-5), scaled by g, a row
 fn normed[x, g]
@@ -41,7 +42,7 @@ fn block[x, mask, g1, q0, k0, v0, o0, q1, k1, v1, o1, g2, w1, w2]
     h = normed[x, g1]
     x = x + head[h, q0, k0, v0, mask] * o0 + head[h, q1, k1, v1, mask] * o1
     h = normed[x, g2]
-    return x + nn.gelu[h * w1] * w2
+    return x + F.gelu[h * w1] * w2
 
 --- the logits of each position over the vocabulary
 fn logits[X, P, mask, wte, wpe, a_g1, a_q0, a_k0, a_v0, a_o0, a_q1, a_k1, a_v1, a_o1, a_g2, a_w1, a_w2, b_g1, b_q0, b_k0, b_v0, b_o0, b_q1, b_k1, b_v1, b_o1, b_g2, b_w1, b_w2, gf]
@@ -53,7 +54,7 @@ fn logits[X, P, mask, wte, wpe, a_g1, a_q0, a_k0, a_v0, a_o0, a_q1, a_k1, a_v1, 
 --- the loss: the mean cross-entropy of each position's logits against the
 --- next token
 fn loss[X, P, mask, targets, wte, wpe, a_g1, a_q0, a_k0, a_v0, a_o0, a_q1, a_k1, a_v1, a_o1, a_g2, a_w1, a_w2, b_g1, b_q0, b_k0, b_v0, b_o0, b_q1, b_k1, b_v1, b_o1, b_g2, b_w1, b_w2, gf]
-    return nn.crossentropy[logits[X, P, mask, wte, wpe, a_g1, a_q0, a_k0, a_v0, a_o0, a_q1, a_k1, a_v1, a_o1, a_g2, a_w1, a_w2, b_g1, b_q0, b_k0, b_v0, b_o0, b_q1, b_k1, b_v1, b_o1, b_g2, b_w1, b_w2, gf], targets]
+    return F.cross_entropy[logits[X, P, mask, wte, wpe, a_g1, a_q0, a_k0, a_v0, a_o0, a_q1, a_k1, a_v1, a_o1, a_g2, a_w1, a_w2, b_g1, b_q0, b_k0, b_v0, b_o0, b_q1, b_k1, b_v1, b_o1, b_g2, b_w1, b_w2, gf], targets]
 
 --- the inputs of a sequence of ids: the one-hot tokens, the one-hot
 --- positions (the block's first rows) and the causal mask

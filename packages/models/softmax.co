@@ -3,13 +3,14 @@
 --- the mean cross-entropy — the gradient by `grad`, no derivative written
 --- out. `x` holds a row of features per sample, `y` an int class for
 --- each, 0 to classes − 1.
-use math, nn
+use math
+use nn.functional as F
 
 struct Softmax [w, b, classes]
 
 --- the mean cross-entropy of the scores against the classes
 fn loss[w, b, x, y]
-    return nn.crossentropy[x * w + b, y]
+    return F.cross_entropy[x * w + b, y]
 
 fn fit[x, y, classes, steps, rate]
     k = len[x[0]]

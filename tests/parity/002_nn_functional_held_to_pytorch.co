@@ -1,0 +1,4 @@
+--- nn.functional held to PyTorch in both modes: every case of
+--- packages/nn/reference agrees (held.co's check), compiled as interpreted
+use nn.held
+log[held.disagreements[]]

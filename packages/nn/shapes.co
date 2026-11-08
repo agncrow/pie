@@ -1,0 +1,68 @@
+--- `use nn.shapes`: the shapes nn's functions lay numbers in — an axis
+--- counted from either end, a tensor laid in a list of sizes, a size
+--- replaced — the work PyTorch's `view` and `dim=` arguments do.
+use math
+
+--- the axis a `dim` names: a negative one counted from the end
+fn axis[x, dim]
+    return axis_of[x.shape, dim]
+
+--- the axis a `dim` names in a tensor of sizes `dims`
+fn axis_of[dims, dim]
+    axes = len[dims]
+    a = dim
+    if a lt 0
+        a = a + axes
+    if a lt 0 or a gte axes
+        halt['dim `dim` is no axis of a tensor of `axes` axes']
+    return a
+
+--- the numbers of a tensor laid in `dims`, one to six axes (`reshape`
+--- takes its sizes one by one)
+fn laid[t, dims]
+    n = len[dims]
+    if n eq 1
+        return reshape[t, dims[0]]
+    if n eq 2
+        return reshape[t, dims[0], dims[1]]
+    if n eq 3
+        return reshape[t, dims[0], dims[1], dims[2]]
+    if n eq 4
+        return reshape[t, dims[0], dims[1], dims[2], dims[3]]
+    if n eq 5
+        return reshape[t, dims[0], dims[1], dims[2], dims[3], dims[4]]
+    if n ne 6
+        halt['a tensor of `n` axes: pie lays one to six']
+    return reshape[t, dims[0], dims[1], dims[2], dims[3], dims[4], dims[5]]
+
+--- the product of a list of sizes
+fn product[sizes]
+    total = 1
+    for s in sizes
+        total = total * s
+    return total
+
+--- a shape with axis `a` given the size `n`
+fn with_size[shape, a, n]
+    dims = []
+    for i in range[len[shape]]
+        d = shape[i]
+        if i eq a
+            d = n
+        dims = push[dims, d]
+    return dims
+
+--- a reduction along axis `a` laid to broadcast against the tensor of
+--- `shape` it reduced (PyTorch's keepdim)
+fn kept[r, shape, a]
+    return laid[r, with_size[shape, a, 1]]
+
+test the_shapes_are_pytorchs[]
+    x = math.zeros[2, 3, 4]
+    axis[x, -1] eq 2
+    axis[x, 0] eq 0
+    laid[tensor[range[6]], [2, 3]].shape eq [2, 3]
+    product[[2, 3, 4]] eq 24
+    product[[]] eq 1
+    with_size[[2, 3, 4], 1, 1] eq [2, 1, 4]
+    kept[sum[x, 1], x.shape, 1].shape eq [2, 1, 4]

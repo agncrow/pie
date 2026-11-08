@@ -11,7 +11,7 @@ follows: PyTorch in float64, scikit-learn, scipy, networkx, faiss.
 
 | Package | What it is |
 |---|---|
-| [`packages/nn`](packages/nn) | activations, losses, layers, modules, initialisers — PyTorch's `torch.nn` |
+| [`packages/nn`](packages/nn) | activations, losses, layers, modules, initialisers, optimisers and their schedules — PyTorch's `torch.nn`, `torch.nn.functional`, `torch.nn.init` and `torch.optim` |
 | [`packages/stats`](packages/stats) | descriptive statistics, correlation, tests and fits — scipy.stats |
 | [`packages/models`](packages/models/README.md) | the classical models, metrics, cross-validation — scikit-learn |
 | [`packages/optimize`](packages/optimize/README.md) | minimisers and roots — scipy.optimize |
@@ -28,10 +28,26 @@ deps = map[nn = 'github.com/agncrow/pie/packages/nn@v0.1.0']
 ```
 
 ```
-use math, nn
+use math
+use nn
+use nn.functional as F
+use nn.optim
 
-log[nn.softmax[[1.0, 2.0, 3.0]]]
+fn loss[model, theta, x, y]
+    return F.mse_loss[nn.forward[model, theta, x], y]
+
+model = nn.sequential[[nn.linear[3, 4], nn.relu[], nn.linear[4, 1]]]
+x = tensor[[[1.0, 2.0, 3.0], [0.5, -1.0, 2.0]]]
+y = tensor[[[1.0], [0.0]]]
+opt = optim.sgd[nn.parameters[model], lr = 0.1]
+for k in range[50]
+    opt = optim.step[opt, grad[loss][model, opt.theta, x, y][0]]
+log[loss[model, opt.theta, x, y]]
 ```
+
+A model is a record of its layers beside one vector of parameters,
+`theta`; `grad[loss]` answers the gradient of every parameter at once, and
+an optimiser's step is arithmetic over that vector.
 
 `./test.sh [crow]` runs every package's tests and examples in both modes.
 [docs/pie-design.md](docs/pie-design.md) says where the line with crow

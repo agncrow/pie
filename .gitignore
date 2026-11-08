@@ -1,7 +1,11 @@
-# what crow builds and keeps beside a program
+# what crow builds and keeps beside a program: the build, the book derived
+# on every start and the pid files `crow run` and `crow book` keep while
+# they serve (the baseline and a request's recorded fixtures are the
+# program's own, and tracked)
 .crow_build/
 target/
-**/.crow/
+**/.crow/book/
+**/.crow/*.pid
 # the logs and data a program run here writes
 *.csv
 *.txt
@@ -21,3 +25,8 @@ docs/book/crow-site/
 !packages/gpt/reference/expected/*.txt
 !packages/vectors/reference/data/*.csv
 !packages/vectors/reference/expected/*.csv
+!packages/nn/reference/data/*.csv
+!packages/nn/reference/expected/*.csv
+!**/.crow/baseline/
+!**/.crow/baseline/**
+!**/.crow/fixtures/*.json

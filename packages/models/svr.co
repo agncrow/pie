@@ -4,7 +4,8 @@
 --- (an error within `epsilon` costs nothing) plus `penalty` on the
 --- weights' roughness — the gradient by `grad`, nothing written out. `x`
 --- holds a row of features per sample, `y` a number for each.
-use math, nn
+use math
+use nn.functional as F
 
 struct Svr [x, beta, width]
 
@@ -28,7 +29,7 @@ fn kernel_row[xs, i, width]
 --- every parameter is a tensor)
 fn loss[beta, k, y, eps, pen]
     fitted = k * beta
-    miss = nn.relu[abs[fitted - y] - eps]
+    miss = F.relu[abs[fitted - y] - eps]
     return mean[miss] + pen * sum[beta .* fitted]
 
 fn fit[x, y, width, epsilon, penalty, steps, rate]

@@ -1,0 +1,17 @@
+case,x,y,pre,mode,takes,names
+mlp,b,none,none,train,1,0.weight:4x5 0.bias:4 2.weight:4 2.bias:4 3.weight:3x4 3.bias:3
+mlp_nobias,b,none,none,train,1,0.weight:4x5 2.weight:2x4
+bn_train,b,none,none,train,1,0.weight:4x5 0.bias:4 1.weight:4 1.bias:4 3.weight:2x4 3.bias:2
+bn_eval,b,none,b2,eval,1,0.weight:4x5 0.bias:4 1.weight:4 1.bias:4 3.weight:2x4 3.bias:2
+bn_twice,b,none,b2,train,1,0.weight:4x5 0.bias:4 1.weight:4 1.bias:4 3.weight:2x4 3.bias:2
+bn_image,img,none,none,train,1,0.weight:3 0.bias:3
+bn_plain,b,none,none,train,1,1.weight:2x5 1.bias:2
+norms,img,none,none,train,1,0.weight:3 0.bias:3 1.weight:3 2.weight:3 2.bias:3 3.weight:3 3.bias:3
+embedding,ids,none,none,train,0,0.weight:6x3 2.weight:2x9 2.bias:2
+rms,b,none,none,train,1,0.weight:4x5 0.bias:4 1.weight:4 3.weight:3x4 3.bias:3
+pair,b,none,none,train,1,dec.weight:3x4 dec.bias:3 enc.weight:4x5 enc.bias:4
+bilinear,x2,b,none,train,2,weight:2x3x5 bias:2
+flatten,img,none,none,train,1,1.weight:2x12 1.bias:2
+dropout_eval,b,none,none,eval,1,0.weight:4x5 0.bias:4
+activations,b,none,none,train,1,none
+nested,b,none,none,train,1,0.0.weight:4x5 0.0.bias:4 1.0.weight:4 1.1.weight:2x4 1.1.bias:2

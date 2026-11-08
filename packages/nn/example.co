@@ -1,12 +1,30 @@
---- pie's nn at work: each activation, each loss and the linear layer.
-use math, nn
+--- pie's nn at work, PyTorch's way: a model of layers whose parameters are
+--- one tensor, theta; the loss's gradient by `grad`; Adam's steps on a
+--- cosine schedule. A small network learns XOR.
+use math
+use nn
+use functional as F
+use optim
+use lr_scheduler as lrs
 
-x = [[-1.0, 0.5], [2.0, -0.25]]
-log['relu: `nn.relu[x]`']
-log['sigmoid of 0: `flatten[nn.sigmoid[[0.0]]][0]`']
-log['softmax: `nn.softmax[[1.0, 2.0, 3.0]]`']
-log['gelu of 1: `flatten[nn.gelu[[1.0]]][0]`']
-log['mse: `nn.mse[[1.0, 2.0], [1.0, 4.0]]`']
-log['bce: `nn.bce[[0.9, 0.1], [1.0, 0.0]]`']
-log['crossentropy: `nn.crossentropy[[[2.0, 0.0], [0.0, 3.0]], [0.0, 1.0]]`']
-log['linear: `nn.linear[x, [[1.0], [2.0]], [0.5]]`']
+fn loss[model, theta, x, y]
+    return F.mse_loss[nn.forward[model, theta, x], y]
+
+seed[7]
+model = nn.sequential[[nn.linear[2, 8], nn.tanh[], nn.linear[8, 1]]]
+x = tensor[[[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]]
+y = tensor[[[0.0], [1.0], [1.0], [0.0]]]
+opt = optim.adam[nn.parameters[model], lr = 0.05]
+opt = lrs.cosine_annealing_lr[opt, 300]
+first = loss[model, opt.theta, x, y]
+for k in range[300]
+    gs = grad[loss][model, opt.theta, x, y]
+    opt = optim.step[opt, gs[0]]
+    opt = lrs.step[opt]
+last = loss[model, opt.theta, x, y]
+log['parameters: `nn.size[model]`']
+log['the loss fell below a hundredth of where it began: `last lt first / 100.0`']
+log['the rate at the end of the schedule: `lrs.last_lr[opt][0]`']
+out = nn.forward[model, opt.theta, x]
+sides = (out - 0.5) .* (y - 0.5)
+log['each output on the right side of a half: `min[sides] gt 0.0`']

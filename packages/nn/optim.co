@@ -1,0 +1,561 @@
+--- `use nn.optim`: PyTorch's torch.optim. An optimizer is a function named
+--- as PyTorch's class in lowercase — `optim.adam[theta, lr = 0.01]` is
+--- torch.optim.Adam(params, lr=0.01) — answering an Optimizer: the
+--- parameters it moves (one flat tensor, theta, laid as nn lays a model's),
+--- its groups and its state. `opt = optim.step[opt, g]` takes one step with
+--- g, the gradient of theta (`grad[loss][model, opt.theta, batch]`'s first),
+--- and `opt.theta` is where the step moved theta. A step is PyTorch's
+--- single-tensor one (foreach=False), operation for operation: a run
+--- repeats PyTorch's to the last digits its fused multiply-adds leave
+--- (held_optim.co holds every optimizer to torch's within 1e-12).
+---
+--- A group is one of PyTorch's param_groups: `optim.grouped[opt,
+--- [optim.param_group[ranges, map[lr = 0.01]], …]]` gives each group the
+--- parts of theta it moves (`[at, size]` pairs, as `nn.ranges[model,
+--- paths]` reads them off a model) and the hyperparameters it sets; what a
+--- group leaves out is the optimizer's. A pair of PyTorch's is two
+--- numbers here, as an optimizer takes them and a group sets them: Adam's
+--- `betas` are `beta1` and `beta2`, Rprop's `etas` are `etaminus` and
+--- `etaplus` and its `step_sizes` `step_min` and `step_max`. `optim.hyper[opt, 'lr']` reads a
+--- hyperparameter of every group and `optim.with_hyper[opt, 'lr', values]`
+--- sets it, as a PyTorch loop over `optimizer.param_groups` does. The
+--- schedules of `use nn.lr_scheduler` are kept on the optimizer and step it.
+use math as m
+
+--- a group: the [at, size] ranges of theta it moves, its hyperparameters,
+--- the numbers it keeps from step to step (NAdam's mu_product, ASGD's eta
+--- and mu) and its state: a tensor per name (`exp_avg`, …), its ranges'
+--- numbers in order
+struct Group [ranges, hyper, numbers, kept]
+
+--- an optimizer: its form (`sgd`, `adam`, …), theta, the hyperparameters
+--- a group leaves out (PyTorch's defaults), its groups, its flags
+--- (`maximize`, `nesterov`, `amsgrad`, `centered`, `decoupled`), the steps
+--- taken, the schedules attached (`use nn.lr_scheduler`), and a sequence's
+--- milestones and epoch (lr_scheduler.sequential_lr's)
+struct Optimizer [form, theta, defaults, groups, flags, steps, schedules, milestones, epoch]
+
+--- a group's step: theta's part moved, the numbers and the state kept
+struct Moved [theta, numbers, kept]
+
+--- the making ---------------------------------------------------------------
+
+fn _flags[maximize, nesterov, amsgrad, centered, decoupled]
+    return map[maximize = maximize, nesterov = nesterov, amsgrad = amsgrad, centered = centered, decoupled = decoupled]
+
+fn _made[form, theta, defaults, flags]
+    if len[theta.shape] ne 1
+        halt['an optimizer moves a flat theta, one axis; this one has `len[theta.shape]`']
+    lr = defaults['lr']
+    if lr lt 0.0
+        halt['Invalid learning rate: `lr`']
+    whole = push[[], [0, len[theta]]]
+    one = Group[whole, defaults, map[], map[]]
+    return Optimizer[form, theta, defaults, [one], flags, 0, [], [], 0]
+
+fn _betas[beta1, beta2]
+    b = [float[beta1], float[beta2]]
+    if b[0] lt 0.0 or b[0] gte 1.0
+        halt['Invalid beta parameter at index 0: `b[0]`']
+    if b[1] lt 0.0 or b[1] gte 1.0
+        halt['Invalid beta parameter at index 1: `b[1]`']
+    return b
+
+fn _checked[value, what]
+    if value lt 0.0
+        halt['Invalid `what` value: `value`']
+    return value
+
+--- sgd[theta, lr]: stochastic gradient descent, with momentum, dampening,
+--- weight decay and Nesterov momentum (torch.optim.SGD)
+fn sgd[theta, lr = 0.001, momentum = 0.0, dampening = 0.0, weight_decay = 0.0, nesterov = false, maximize = false]
+    if nesterov and (momentum lte 0.0 or dampening ne 0.0)
+        halt['Nesterov momentum requires a momentum and zero dampening']
+    defaults = map[lr = float[lr], momentum = _checked[float[momentum], 'momentum'], dampening = float[dampening], weight_decay = _checked[float[weight_decay], 'weight_decay']]
+    return _made['sgd', theta, defaults, _flags[maximize, nesterov, false, false, false]]
+
+--- adam[theta, lr]: Adam (torch.optim.Adam); with decoupled_weight_decay it
+--- is AdamW
+fn adam[theta, lr = 0.001, beta1 = 0.9, beta2 = 0.999, eps = 0.00000001, weight_decay = 0.0, amsgrad = false, maximize = false, decoupled_weight_decay = false]
+    b = _betas[beta1, beta2]
+    defaults = map[lr = float[lr], beta1 = b[0], beta2 = b[1], eps = _checked[float[eps], 'epsilon'], weight_decay = _checked[float[weight_decay], 'weight_decay']]
+    return _made['adam', theta, defaults, _flags[maximize, false, amsgrad, false, decoupled_weight_decay]]
+
+--- adamw[theta, lr]: Adam with the weight decay taken from theta itself,
+--- not added to the gradient (torch.optim.AdamW)
+fn adamw[theta, lr = 0.001, beta1 = 0.9, beta2 = 0.999, eps = 0.00000001, weight_decay = 0.01, amsgrad = false, maximize = false]
+    b = _betas[beta1, beta2]
+    defaults = map[lr = float[lr], beta1 = b[0], beta2 = b[1], eps = _checked[float[eps], 'epsilon'], weight_decay = _checked[float[weight_decay], 'weight_decay']]
+    return _made['adamw', theta, defaults, _flags[maximize, false, amsgrad, false, true]]
+
+--- adamax[theta, lr]: Adam over the infinity norm (torch.optim.Adamax)
+fn adamax[theta, lr = 0.002, beta1 = 0.9, beta2 = 0.999, eps = 0.00000001, weight_decay = 0.0, maximize = false]
+    b = _betas[beta1, beta2]
+    defaults = map[lr = float[lr], beta1 = b[0], beta2 = b[1], eps = _checked[float[eps], 'epsilon'], weight_decay = _checked[float[weight_decay], 'weight_decay']]
+    return _made['adamax', theta, defaults, _flags[maximize, false, false, false, false]]
+
+--- nadam[theta, lr]: Adam with Nesterov momentum (torch.optim.NAdam)
+fn nadam[theta, lr = 0.002, beta1 = 0.9, beta2 = 0.999, eps = 0.00000001, weight_decay = 0.0, momentum_decay = 0.004, decoupled_weight_decay = false, maximize = false]
+    b = _betas[beta1, beta2]
+    defaults = map[lr = float[lr], beta1 = b[0], beta2 = b[1], eps = _checked[float[eps], 'epsilon'], weight_decay = _checked[float[weight_decay], 'weight_decay'], momentum_decay = _checked[float[momentum_decay], 'momentum_decay']]
+    return _made['nadam', theta, defaults, _flags[maximize, false, false, false, decoupled_weight_decay]]
+
+--- radam[theta, lr]: rectified Adam (torch.optim.RAdam)
+fn radam[theta, lr = 0.001, beta1 = 0.9, beta2 = 0.999, eps = 0.00000001, weight_decay = 0.0, decoupled_weight_decay = false, maximize = false]
+    b = _betas[beta1, beta2]
+    defaults = map[lr = float[lr], beta1 = b[0], beta2 = b[1], eps = _checked[float[eps], 'epsilon'], weight_decay = _checked[float[weight_decay], 'weight_decay']]
+    return _made['radam', theta, defaults, _flags[maximize, false, false, false, decoupled_weight_decay]]
+
+--- rmsprop[theta, lr]: RMSprop, centered or not, with momentum
+--- (torch.optim.RMSprop)
+fn rmsprop[theta, lr = 0.01, alpha = 0.99, eps = 0.00000001, weight_decay = 0.0, momentum = 0.0, centered = false, maximize = false]
+    defaults = map[lr = float[lr], alpha = _checked[float[alpha], 'alpha'], eps = _checked[float[eps], 'epsilon'], weight_decay = _checked[float[weight_decay], 'weight_decay'], momentum = _checked[float[momentum], 'momentum']]
+    return _made['rmsprop', theta, defaults, _flags[maximize, false, false, centered, false]]
+
+--- adagrad[theta, lr]: Adagrad (torch.optim.Adagrad)
+fn adagrad[theta, lr = 0.01, lr_decay = 0.0, weight_decay = 0.0, initial_accumulator_value = 0.0, eps = 0.0000000001, maximize = false]
+    defaults = map[lr = float[lr], lr_decay = _checked[float[lr_decay], 'lr_decay'], weight_decay = _checked[float[weight_decay], 'weight_decay'], initial_accumulator_value = _checked[float[initial_accumulator_value], 'initial_accumulator_value'], eps = _checked[float[eps], 'epsilon']]
+    return _made['adagrad', theta, defaults, _flags[maximize, false, false, false, false]]
+
+--- adadelta[theta, lr]: Adadelta (torch.optim.Adadelta)
+fn adadelta[theta, lr = 1.0, rho = 0.9, eps = 0.000001, weight_decay = 0.0, maximize = false]
+    if rho lt 0.0 or rho gt 1.0
+        halt['Invalid rho value: `rho`']
+    defaults = map[lr = float[lr], rho = float[rho], eps = _checked[float[eps], 'epsilon'], weight_decay = _checked[float[weight_decay], 'weight_decay']]
+    return _made['adadelta', theta, defaults, _flags[maximize, false, false, false, false]]
+
+--- rprop[theta, lr]: resilient backpropagation: each number's own step,
+--- grown by etaplus while its gradient keeps its sign and shrunk by
+--- etaminus when the sign turns, held between step_min and step_max
+--- (torch.optim.Rprop)
+fn rprop[theta, lr = 0.01, etaminus = 0.5, etaplus = 1.2, step_min = 0.000001, step_max = 50.0, maximize = false]
+    if not (0.0 lt etaminus and etaminus lt 1.0 and 1.0 lt etaplus)
+        halt['Invalid eta values: `etaminus`, `etaplus`']
+    defaults = map[lr = float[lr], etaminus = float[etaminus], etaplus = float[etaplus], step_min = float[step_min], step_max = float[step_max]]
+    return _made['rprop', theta, defaults, _flags[maximize, false, false, false, false]]
+
+--- asgd[theta, lr]: averaged stochastic gradient descent (torch.optim.ASGD);
+--- `optim.averaged[opt]` is theta averaged
+fn asgd[theta, lr = 0.01, lambd = 0.0001, alpha = 0.75, t0 = 1000000.0, weight_decay = 0.0, maximize = false]
+    defaults = map[lr = float[lr], lambd = float[lambd], alpha = float[alpha], t0 = float[t0], weight_decay = _checked[float[weight_decay], 'weight_decay']]
+    return _made['asgd', theta, defaults, _flags[maximize, false, false, false, false]]
+
+--- the groups ---------------------------------------------------------------
+
+--- param_group[ranges, hyper]: a group of theta's numbers — `[at, size]`
+--- ranges — and the hyperparameters it sets (`map[lr = 0.01]`, `map[]`
+--- for none), for `optim.grouped`
+fn param_group[ranges, given]
+    out = []
+    for r in ranges
+        if len[r] ne 2
+            halt['a range of a group is [at, size], given `len[r]` numbers']
+        out = push[out, [int[r[0]], int[r[1]]]]
+    return Group[out, given, map[], map[]]
+
+--- grouped[opt, groups]: the optimizer moving theta's numbers in groups,
+--- each with its hyperparameters over the optimizer's (PyTorch's
+--- param_groups, in their order); a number no group names stays where it is
+fn grouped[opt, groups]
+    if opt.steps gt 0
+        halt['an optimizer is grouped before its first step']
+    made = []
+    spans = []
+    for one in groups
+        hs = opt.defaults
+        for k in keys[one.hyper]
+            if not (k in hs)
+                halt['a param group sets `k`, which is no hyperparameter of `opt.form`']
+            hs[k] = float[one.hyper[k]]
+        for r in one.ranges
+            if r[0] lt 0 or r[1] lt 0 or r[0] + r[1] gt len[opt.theta]
+                halt['a range of a param group, [`r[0]`, `r[1]`], lies outside the `len[opt.theta]` numbers of theta']
+            for s in spans
+                if r[0] lt s[0] + s[1] and s[0] lt r[0] + r[1]
+                    halt['some parameters appear in more than one parameter group']
+            spans = push[spans, r]
+        made = push[made, Group[one.ranges, hs, map[], map[]]]
+    return Optimizer[opt.form, opt.theta, opt.defaults, made, opt.flags, opt.steps, opt.schedules, opt.milestones, opt.epoch]
+
+--- hyper[opt, key]: the hyperparameter of every group, in order
+fn hyper[opt, key]
+    out = []
+    for one in opt.groups
+        if not (key in one.hyper)
+            halt['`opt.form` has no hyperparameter `key`']
+        out = push[out, one.hyper[key]]
+    return out
+
+--- has_hyper[opt, key]: whether every group holds the hyperparameter (a
+--- schedule's `initial_lr`, once one is attached)
+fn has_hyper[opt, key]
+    for one in opt.groups
+        if not (key in one.hyper)
+            return false
+    return true
+
+--- hyper_or[opt, key, other]: each group's hyperparameter, or its other
+--- where it holds none (a schedule's initial_lr, PyTorch's setdefault)
+fn hyper_or[opt, key, other]
+    out = []
+    for one in opt.groups
+        if key in one.hyper
+            out = push[out, one.hyper[key]]
+        else
+            out = push[out, one.hyper[other]]
+    return out
+
+--- with_hyper[opt, key, values]: the optimizer with each group's
+--- hyperparameter set to its value
+fn with_hyper[opt, key, given]
+    if len[given] ne len[opt.groups]
+        halt['`len[given]` values for `len[opt.groups]` groups']
+    made = []
+    i = 0
+    for one in opt.groups
+        hs = one.hyper
+        hs[key] = float[given[i]]
+        made = push[made, Group[one.ranges, hs, one.numbers, one.kept]]
+        i = i + 1
+    return Optimizer[opt.form, opt.theta, opt.defaults, made, opt.flags, opt.steps, opt.schedules, opt.milestones, opt.epoch]
+
+--- averaged[opt]: ASGD's averaged theta (its state `ax`; theta itself
+--- before the first step and outside every group)
+fn averaged[opt]
+    if opt.form ne 'asgd'
+        halt['only ASGD averages theta; this is `opt.form`']
+    out = opt.theta
+    for one in opt.groups
+        if 'ax' in one.kept
+            out = _scattered[out, one.ranges, one.kept['ax']]
+    return out
+
+--- state[opt, name]: the state a step keeps under the name (`exp_avg`,
+--- `momentum_buffer`, …) for all of theta, PyTorch's `optimizer.state[p]
+--- [name]` laid as theta is (zero where no group keeps it)
+fn state[opt, name]
+    out = opt.theta * 0.0
+    for one in opt.groups
+        if name in one.kept
+            out = _scattered[out, one.ranges, one.kept[name]]
+    return out
+
+--- the step -----------------------------------------------------------------
+
+--- step[opt, g]: one step of the optimizer with g, the gradient of theta
+--- (PyTorch's `optimizer.step()` after `loss.backward()`)
+fn step[opt, g]
+    if len[g] ne len[opt.theta]
+        halt['the gradient holds `len[g]` numbers and theta `len[opt.theta]`']
+    taken = opt.steps + 1
+    at = float[taken]
+    theta = opt.theta
+    made = []
+    for one in opt.groups
+        whole = _whole[one.ranges, len[theta]]
+        p = theta
+        d = g
+        if not whole
+            p = _gathered[theta, one.ranges]
+            d = _gathered[g, one.ranges]
+        if opt.flags['maximize']
+            d = -d
+        moved = _moved[opt.form, opt.flags, one, p, d, at]
+        if whole
+            theta = moved.theta
+        else
+            theta = _scattered[theta, one.ranges, moved.theta]
+        made = push[made, Group[one.ranges, one.hyper, moved.numbers, moved.kept]]
+    return Optimizer[opt.form, theta, opt.defaults, made, opt.flags, taken, opt.schedules, opt.milestones, opt.epoch]
+
+fn _whole[ranges, n]
+    if len[ranges] ne 1
+        return false
+    return ranges[0][0] eq 0 and ranges[0][1] eq n
+
+--- the numbers of v the ranges name, in order
+fn _gathered[v, ranges]
+    out = slice[v, ranges[0][0], ranges[0][0] + ranges[0][1]]
+    i = 1
+    while i lt len[ranges]
+        r = ranges[i]
+        out = concat[out, slice[v, r[0], r[0] + r[1]]]
+        i = i + 1
+    return out
+
+--- theta with the ranges' numbers replaced by the piece's, in order
+fn _scattered[theta, ranges, piece]
+    out = theta
+    offset = 0
+    for r in ranges
+        before = slice[out, 0, r[0]]
+        after = slice[out, r[0] + r[1], len[out]]
+        out = concat[concat[before, slice[piece, offset, offset + r[1]]], after]
+        offset = offset + r[1]
+    return out
+
+--- a state tensor, or n zeros before the first step
+fn _held[kept, key, n]
+    if key in kept
+        return kept[key]
+    return m.zeros[n]
+
+--- PyTorch's lerp: start + w (stop − start), from the stop's side when the
+--- weight is half or more
+fn _lerped[start, stop, w]
+    if abs[w] lt 0.5
+        return start + w * (stop - start)
+    return stop - (stop - start) * (1.0 - w)
+
+--- the larger of two tensors, number by number (torch.maximum)
+fn _larger[a, b]
+    return m.where[a - b gt 0.0, a, b]
+
+fn _moved[form, flags, one, p, d, at]
+    if form eq 'sgd'
+        return _sgd[flags, one, p, d]
+    if form eq 'adam' or form eq 'adamw'
+        return _adam[flags, one, p, d, at]
+    if form eq 'adamax'
+        return _adamax[one, p, d, at]
+    if form eq 'nadam'
+        return _nadam[flags, one, p, d, at]
+    if form eq 'radam'
+        return _radam[flags, one, p, d, at]
+    if form eq 'rmsprop'
+        return _rmsprop[flags, one, p, d]
+    if form eq 'adagrad'
+        return _adagrad[one, p, d, at]
+    if form eq 'adadelta'
+        return _adadelta[one, p, d]
+    if form eq 'rprop'
+        return _rprop[one, p, d]
+    if form eq 'asgd'
+        return _asgd[one, p, d, at]
+    halt['no optimizer `form`']
+
+--- the gradient with the weight decay added (PyTorch's grad.add(param,
+--- alpha=weight_decay))
+fn _decayed[h, p, d]
+    wd = h['weight_decay']
+    if wd ne 0.0
+        return d + wd * p
+    return d
+
+fn _sgd[flags, one, p, g]
+    h = one.hyper
+    kept = one.kept
+    d = _decayed[h, p, g]
+    mom = h['momentum']
+    if mom ne 0.0
+        buf = d
+        if 'momentum_buffer' in kept
+            buf = kept['momentum_buffer'] * mom + (1.0 - h['dampening']) * d
+        kept['momentum_buffer'] = buf
+        if flags['nesterov']
+            d = d + mom * buf
+        else
+            d = buf
+    return Moved[p - h['lr'] * d, one.numbers, kept]
+
+fn _adam[flags, one, p0, g, at]
+    h = one.hyper
+    kept = one.kept
+    lr = h['lr']
+    b1 = h['beta1']
+    b2 = h['beta2']
+    p = p0
+    d = g
+    wd = h['weight_decay']
+    if wd ne 0.0
+        if flags['decoupled']
+            p = p * (1.0 - lr * wd)
+        else
+            d = d + wd * p
+    n = len[p]
+    avg = _lerped[_held[kept, 'exp_avg', n], d, 1.0 - b1]
+    sq = _held[kept, 'exp_avg_sq', n] * b2 + ((1.0 - b2) * d) .* d
+    kept['exp_avg'] = avg
+    kept['exp_avg_sq'] = sq
+    bc1 = 1.0 - b1 ^ at
+    bc2 = 1.0 - b2 ^ at
+    step_size = lr / bc1
+    root = bc2 ^ 0.5
+    top = sq
+    if flags['amsgrad']
+        top = _larger[_held[kept, 'max_exp_avg_sq', n], sq]
+        kept['max_exp_avg_sq'] = top
+    denom = m.sqrt[top] / root + h['eps']
+    return Moved[p + (-step_size * avg) ./ denom, one.numbers, kept]
+
+fn _adamax[one, p, g, at]
+    h = one.hyper
+    kept = one.kept
+    b1 = h['beta1']
+    d = _decayed[h, p, g]
+    n = len[p]
+    avg = _lerped[_held[kept, 'exp_avg', n], d, 1.0 - b1]
+    peak = _larger[_held[kept, 'exp_inf', n] * h['beta2'], m.abs[d] + h['eps']]
+    kept['exp_avg'] = avg
+    kept['exp_inf'] = peak
+    clr = h['lr'] / (1.0 - b1 ^ at)
+    return Moved[p + (-clr * avg) ./ peak, one.numbers, kept]
+
+fn _nadam[flags, one, p0, g, at]
+    h = one.hyper
+    kept = one.kept
+    nums = one.numbers
+    lr = h['lr']
+    b1 = h['beta1']
+    b2 = h['beta2']
+    md = h['momentum_decay']
+    p = p0
+    d = g
+    bc2 = 1.0 - b2 ^ at
+    wd = h['weight_decay']
+    if wd ne 0.0
+        if flags['decoupled']
+            p = p * (1.0 - lr * wd)
+        else
+            d = d + wd * p
+    mu = b1 * (1.0 - 0.5 * 0.96 ^ (at * md))
+    mu_next = b1 * (1.0 - 0.5 * 0.96 ^ ((at + 1.0) * md))
+    mu_prod = 1.0
+    if 'mu_product' in nums
+        mu_prod = nums['mu_product']
+    mu_prod = mu_prod * mu
+    nums['mu_product'] = mu_prod
+    n = len[p]
+    avg = _lerped[_held[kept, 'exp_avg', n], d, 1.0 - b1]
+    sq = _held[kept, 'exp_avg_sq', n] * b2 + ((1.0 - b2) * d) .* d
+    kept['exp_avg'] = avg
+    kept['exp_avg_sq'] = sq
+    denom = m.sqrt[sq / bc2]
+    mu_prod_next = mu_prod * mu_next
+    denom = denom + h['eps']
+    p = p + ((-lr * (1.0 - mu) / (1.0 - mu_prod)) * d) ./ denom
+    p = p + (((-lr * mu_next) / (1.0 - mu_prod_next)) * avg) ./ denom
+    return Moved[p, nums, kept]
+
+fn _radam[flags, one, p0, g, at]
+    h = one.hyper
+    kept = one.kept
+    lr = h['lr']
+    b1 = h['beta1']
+    b2 = h['beta2']
+    p = p0
+    d = g
+    wd = h['weight_decay']
+    if wd ne 0.0
+        if flags['decoupled']
+            p = p * (1.0 - lr * wd)
+        else
+            d = d + wd * p
+    n = len[p]
+    avg = _lerped[_held[kept, 'exp_avg', n], d, 1.0 - b1]
+    sq = _held[kept, 'exp_avg_sq', n] * b2 + ((1.0 - b2) * d) .* d
+    kept['exp_avg'] = avg
+    kept['exp_avg_sq'] = sq
+    bc1 = 1.0 - b1 ^ at
+    bc2 = 1.0 - b2 ^ at
+    corrected = avg / bc1
+    rho_inf = 2.0 / (1.0 - b2) - 1.0
+    rho_t = rho_inf - 2.0 * at * b2 ^ at / bc2
+    if rho_t gt 5.0
+        rect = ((rho_t - 4.0) * (rho_t - 2.0) * rho_inf / ((rho_inf - 4.0) * (rho_inf - 2.0) * rho_t)) ^ 0.5
+        adaptive = bc2 ^ 0.5 / (m.sqrt[sq] + h['eps'])
+        return Moved[p - ((corrected * lr) .* adaptive) * rect, one.numbers, kept]
+    return Moved[p - corrected * lr, one.numbers, kept]
+
+fn _rmsprop[flags, one, p, g]
+    h = one.hyper
+    kept = one.kept
+    alpha = h['alpha']
+    d = _decayed[h, p, g]
+    n = len[p]
+    sq = _held[kept, 'square_avg', n] * alpha + ((1.0 - alpha) * d) .* d
+    kept['square_avg'] = sq
+    avg = m.sqrt[sq]
+    if flags['centered']
+        mean_g = _lerped[_held[kept, 'grad_avg', n], d, 1.0 - alpha]
+        kept['grad_avg'] = mean_g
+        avg = m.sqrt[sq + (-1.0 * mean_g) .* mean_g]
+    avg = avg + h['eps']
+    mom = h['momentum']
+    if mom gt 0.0
+        buf = _held[kept, 'momentum_buffer', n] * mom + d ./ avg
+        kept['momentum_buffer'] = buf
+        return Moved[p - h['lr'] * buf, one.numbers, kept]
+    return Moved[p + (-h['lr'] * d) ./ avg, one.numbers, kept]
+
+fn _adagrad[one, p, g, at]
+    h = one.hyper
+    kept = one.kept
+    d = _decayed[h, p, g]
+    clr = h['lr'] / (1.0 + (at - 1.0) * h['lr_decay'])
+    total = m.zeros[len[p]] + h['initial_accumulator_value']
+    if 'sum' in kept
+        total = kept['sum']
+    total = total + d .* d
+    kept['sum'] = total
+    spread = m.sqrt[total] + h['eps']
+    return Moved[p + (-clr * d) ./ spread, one.numbers, kept]
+
+fn _adadelta[one, p, g]
+    h = one.hyper
+    kept = one.kept
+    rho = h['rho']
+    eps = h['eps']
+    d = _decayed[h, p, g]
+    n = len[p]
+    sq = _held[kept, 'square_avg', n] * rho + ((1.0 - rho) * d) .* d
+    spread = m.sqrt[sq + eps]
+    acc = _held[kept, 'acc_delta', n]
+    delta = (m.sqrt[acc + eps] ./ spread) .* d
+    acc = acc * rho + ((1.0 - rho) * delta) .* delta
+    kept['square_avg'] = sq
+    kept['acc_delta'] = acc
+    return Moved[p - h['lr'] * delta, one.numbers, kept]
+
+fn _rprop[one, p, d]
+    h = one.hyper
+    kept = one.kept
+    n = len[p]
+    zero = m.zeros[n]
+    prev = _held[kept, 'prev', n]
+    sizes = zero + h['lr']
+    if 'step_size' in kept
+        sizes = kept['step_size']
+    turned = d .* prev
+    factor = m.where[turned gt 0.0, zero + h['etaplus'], m.where[turned lt 0.0, zero + h['etaminus'], zero + 1.0]]
+    sizes = m.clip[sizes .* factor, h['step_min'], h['step_max']]
+    held_d = m.where[turned lt 0.0, zero, d]
+    kept['step_size'] = sizes
+    kept['prev'] = held_d
+    return Moved[p + (-1.0 * m.sign[held_d]) .* sizes, one.numbers, kept]
+
+fn _asgd[one, p0, g, at]
+    h = one.hyper
+    kept = one.kept
+    nums = one.numbers
+    lr = h['lr']
+    lambd = h['lambd']
+    eta = lr
+    mu = 1.0
+    if 'eta' in nums
+        eta = nums['eta']
+        mu = nums['mu']
+    d = _decayed[h, p0, g]
+    p = p0 * (1.0 - lambd * eta)
+    p = p - eta * d
+    ax = p
+    if mu ne 1.0
+        ax = _held[kept, 'ax', len[p]]
+        ax = ax + (p - ax) * mu
+    kept['ax'] = ax
+    nums['eta'] = lr / (1.0 + lambd * lr * at) ^ h['alpha']
+    past = at - h['t0']
+    nums['mu'] = 1.0
+    if past gt 1.0
+        nums['mu'] = 1.0 / past
+    return Moved[p, nums, kept]

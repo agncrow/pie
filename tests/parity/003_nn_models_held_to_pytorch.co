@@ -1,0 +1,6 @@
+--- nn's layers and models held to PyTorch in both modes: every model case
+--- of packages/nn/reference agrees (held_models.co's check) — its outputs,
+--- its loss's gradient over theta, a batch norm's running statistics —
+--- compiled as interpreted
+use nn.held_models
+log[held_models.disagreements[]]

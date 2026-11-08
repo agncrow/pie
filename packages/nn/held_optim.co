@@ -1,0 +1,265 @@
+--- nn.optim and nn.lr_scheduler held to torch.optim in float64
+--- (reference/optim_reference.py, torch 2.8). Each optimizer case of
+--- reference/expected/optim.csv starts from one theta of 8 numbers, grouped
+--- as the case says, and takes 12 steps on the field g(θ) = a θ − b + c θ³,
+--- stepping its schedule after each step where it has one; its row is
+--- theta after each step, and agrees to 1e-12, relative above 1 and
+--- absolute below (PyTorch's vectorized kernels fuse multiply-adds that
+--- Crow rounds twice). Each schedule case of expected/sched.csv is the
+--- first group's learning rate after the schedule is made and after each
+--- of 30 steps, then its momentum where the schedule cycles one, and agrees
+--- exactly: a schedule is a few numbers of Python's own arithmetic. A
+--- model's gradient clipped by norm and by value (expected/clip.csv) agrees
+--- to 1e-12 as well.
+use math, frame
+use nn
+use held, optim
+use lr_scheduler as lrs
+
+--- the field's gradient at theta, in the reference's order of operations
+fn field[f, th]
+    return (f[1] .* th - f[2]) + ((f[3] .* th) .* th) .* th
+
+fn made[name, theta]
+    if name eq 'sgd'
+        return optim.sgd[theta, lr = 0.1]
+    if name eq 'sgd_momentum'
+        return optim.sgd[theta, lr = 0.05, momentum = 0.9]
+    if name eq 'sgd_dampening'
+        return optim.sgd[theta, lr = 0.05, momentum = 0.9, dampening = 0.3, weight_decay = 0.01]
+    if name eq 'sgd_nesterov'
+        return optim.sgd[theta, lr = 0.05, momentum = 0.8, nesterov = true]
+    if name eq 'sgd_maximize'
+        return optim.sgd[theta, lr = 0.01, momentum = 0.5, maximize = true]
+    if name eq 'adam' or name eq 'adam_cosine' or name eq 'groups_adam' or name eq 'adam_one_cycle'
+        return optim.adam[theta, lr = 0.05]
+    if name eq 'adam_amsgrad'
+        return optim.adam[theta, lr = 0.05, amsgrad = true, weight_decay = 0.1]
+    if name eq 'adam_decoupled'
+        return optim.adam[theta, lr = 0.05, weight_decay = 0.1, decoupled_weight_decay = true]
+    if name eq 'adamw'
+        return optim.adamw[theta, lr = 0.05]
+    if name eq 'adamw_amsgrad'
+        return optim.adamw[theta, lr = 0.05, beta1 = 0.8, beta2 = 0.99, eps = 0.000001, weight_decay = 0.05, amsgrad = true]
+    if name eq 'adam_maximize'
+        return optim.adam[theta, lr = 0.01, beta1 = 0.3, beta2 = 0.9, maximize = true]
+    if name eq 'adamax'
+        return optim.adamax[theta, lr = 0.05, weight_decay = 0.01]
+    if name eq 'nadam'
+        return optim.nadam[theta, lr = 0.05]
+    if name eq 'nadam_decoupled'
+        return optim.nadam[theta, lr = 0.05, weight_decay = 0.1, decoupled_weight_decay = true, momentum_decay = 0.01]
+    if name eq 'radam'
+        return optim.radam[theta, lr = 0.05]
+    if name eq 'radam_wd'
+        return optim.radam[theta, lr = 0.05, beta1 = 0.9, beta2 = 0.99, weight_decay = 0.1]
+    if name eq 'radam_decoupled'
+        return optim.radam[theta, lr = 0.05, weight_decay = 0.1, decoupled_weight_decay = true]
+    if name eq 'rmsprop'
+        return optim.rmsprop[theta, lr = 0.01]
+    if name eq 'rmsprop_centered'
+        return optim.rmsprop[theta, lr = 0.01, alpha = 0.9, centered = true, momentum = 0.5, weight_decay = 0.01]
+    if name eq 'adagrad'
+        return optim.adagrad[theta, lr = 0.1]
+    if name eq 'adagrad_decay'
+        return optim.adagrad[theta, lr = 0.1, lr_decay = 0.01, weight_decay = 0.01, initial_accumulator_value = 0.1]
+    if name eq 'adadelta'
+        return optim.adadelta[theta, lr = 1.0]
+    if name eq 'adadelta_wd'
+        return optim.adadelta[theta, lr = 0.5, rho = 0.8, eps = 0.00001, weight_decay = 0.01]
+    if name eq 'rprop'
+        return optim.rprop[theta, lr = 0.01]
+    if name eq 'rprop_bounds'
+        return optim.rprop[theta, lr = 0.05, etaminus = 0.3, etaplus = 1.5, step_min = 0.001, step_max = 0.1]
+    if name eq 'asgd'
+        return optim.asgd[theta, lr = 0.01]
+    if name eq 'asgd_t0'
+        return optim.asgd[theta, lr = 0.05, lambd = 0.001, alpha = 0.5, t0 = 3.0, weight_decay = 0.01]
+    if name eq 'groups_sgd' or name eq 'sgd_one_cycle' or name eq 'groups_step'
+        return optim.sgd[theta, lr = 0.05, momentum = 0.9]
+    halt['no optimizer case `name`']
+
+--- the case's groups: one, two (the second with a rate and a decay of its
+--- own), or the two swapped (the first group theta's last three numbers)
+fn in_groups[opt, kind]
+    if kind eq 'one'
+        return opt
+    if kind eq 'two'
+        return optim.grouped[opt, [optim.param_group[[[0, 5]], map[]], optim.param_group[[[5, 3]], map[lr = 0.01, weight_decay = 0.1]]]]
+    return optim.grouped[opt, [optim.param_group[[[5, 3]], map[lr = 0.02]], optim.param_group[[[0, 5]], map[]]]]
+
+fn scheduled[name, opt]
+    if name eq 'adam_cosine'
+        return lrs.cosine_annealing_lr[opt, 6]
+    if name eq 'sgd_one_cycle'
+        return lrs.one_cycle_lr[opt, 0.1, total_steps = 12]
+    if name eq 'adam_one_cycle'
+        return lrs.one_cycle_lr[opt, 0.1, total_steps = 12, three_phase = true]
+    if name eq 'groups_step'
+        return lrs.step_lr[opt, 3, gamma = 0.5]
+    return opt
+
+--- an optimizer case's row: theta after each of 12 steps
+fn optim_row[name, kind, f]
+    opt = scheduled[name, in_groups[made[name, f[0]], kind]]
+    row = math.zeros[0]
+    for k in range[12]
+        opt = optim.step[opt, field[f, opt.theta]]
+        opt = lrs.step[opt]
+        row = concat[row, opt.theta]
+    return row
+
+fn optim_disagreements[]
+    f = math.load['packages/nn/reference/data/optim_field.csv']
+    cases = frame.load['packages/nn/reference/expected/optim.csv']
+    out = []
+    for i in range[len[cases]]
+        name = str[cases.case[i]]
+        gap = held.apart[optim_row[name, str[cases.groups[i]], f], held.expected['optim_`name`']]
+        if gap gt 0.000000000001
+            out = push[out, '`name` `gap`']
+    return out
+
+test optimizers_agree_with_pytorch[]
+    optim_disagreements[] eq []
+
+--- the schedules ------------------------------------------------------------
+
+fn decay[epoch]
+    return 0.95 ^ float[epoch]
+
+fn tenth[epoch]
+    return 0.9
+
+fn schedule_of[name, opt]
+    if name eq 'step'
+        return lrs.step_lr[opt, 4, gamma = 0.5]
+    if name eq 'multi_step'
+        return lrs.multi_step_lr[opt, [3, 7, 7, 12], gamma = 0.3]
+    if name eq 'constant'
+        return lrs.constant_lr[opt, factor = 0.25, total_iters = 6]
+    if name eq 'linear'
+        return lrs.linear_lr[opt, start_factor = 0.2, end_factor = 0.9, total_iters = 10]
+    if name eq 'exponential'
+        return lrs.exponential_lr[opt, 0.9]
+    if name eq 'polynomial'
+        return lrs.polynomial_lr[opt, total_iters = 12, power = 2.0]
+    if name eq 'cosine'
+        return lrs.cosine_annealing_lr[opt, 10, eta_min = 0.001]
+    if name eq 'warm_restarts'
+        return lrs.cosine_annealing_warm_restarts[opt, 5, t_mult = 2, eta_min = 0.002]
+    if name eq 'warm_restarts_one'
+        return lrs.cosine_annealing_warm_restarts[opt, 4]
+    if name eq 'cyclic'
+        return lrs.cyclic_lr[opt, 0.01, 0.1, step_size_up = 4, mode = 'triangular2']
+    if name eq 'cyclic_exp'
+        return lrs.cyclic_lr[opt, 0.01, 0.1, step_size_up = 3, step_size_down = 5, mode = 'exp_range', gamma = 0.95, cycle_momentum = false]
+    if name eq 'cyclic_adam'
+        return lrs.cyclic_lr[opt, 0.001, 0.01, step_size_up = 5, base_momentum = 0.85, max_momentum = 0.95]
+    if name eq 'one_cycle'
+        return lrs.one_cycle_lr[opt, 0.2, total_steps = 30]
+    if name eq 'one_cycle_three'
+        return lrs.one_cycle_lr[opt, 0.2, total_steps = 30, pct_start = 0.25, anneal_strategy = 'linear', three_phase = true, div_factor = 10.0, final_div_factor = 100.0]
+    if name eq 'one_cycle_epochs'
+        return lrs.one_cycle_lr[opt, 0.3, epochs = 5, steps_per_epoch = 6, cycle_momentum = false]
+    if name eq 'lambda'
+        return lrs.lambda_lr[opt, decay]
+    if name eq 'multiplicative'
+        return lrs.multiplicative_lr[opt, tenth]
+    if name eq 'sequential'
+        return lrs.sequential_lr[lrs.exponential_lr[lrs.constant_lr[opt, factor = 0.5, total_iters = 3], 0.9], [4]]
+    if name eq 'sequential_cosine'
+        return lrs.sequential_lr[lrs.cosine_annealing_lr[lrs.linear_lr[opt, start_factor = 0.1, total_iters = 5], 20], [5]]
+    if name eq 'chained'
+        return lrs.exponential_lr[lrs.constant_lr[opt, factor = 0.5, total_iters = 3], 0.9]
+    if name eq 'plateau'
+        return lrs.reduce_lr_on_plateau[opt, mode = 'min', factor = 0.5, patience = 2, threshold = 0.01, cooldown = 1, min_lr = 0.001]
+    if name eq 'plateau_max_abs'
+        return lrs.reduce_lr_on_plateau[opt, mode = 'max', threshold_mode = 'abs', threshold = 0.1, patience = 1, factor = 0.3]
+    halt['no schedule case `name`']
+
+--- the first group's momentum (Adam's beta1)
+fn momentum_of[opt]
+    if opt.form eq 'sgd'
+        return optim.hyper[opt, 'momentum'][0]
+    return optim.hyper[opt, 'beta1'][0]
+
+--- a schedule case's row: the rate after the schedule is made and after
+--- each of 30 steps, then the momentum the same way where it cycles
+fn sched_row[name, which, reads, cycles, metrics]
+    opt = optim.adam[math.zeros[1], lr = 0.1]
+    if which eq 'sgd'
+        opt = optim.sgd[math.zeros[1], lr = 0.1, momentum = 0.9]
+    opt = schedule_of[name, opt]
+    rates = [lrs.last_lr[opt][0]]
+    momenta = [momentum_of[opt]]
+    for k in range[30]
+        opt = optim.step[opt, math.zeros[1]]
+        if reads eq 'none'
+            opt = lrs.step[opt]
+        else
+            row = 0
+            if reads eq 'rising'
+                row = 1
+            opt = lrs.step_on[opt, metrics[row][k]]
+        rates = push[rates, lrs.last_lr[opt][0]]
+        momenta = push[momenta, momentum_of[opt]]
+    if cycles
+        return math.tensor[concat[rates, momenta]]
+    return math.tensor[rates]
+
+fn sched_disagreements[]
+    metrics = math.load['packages/nn/reference/data/sched_metrics.csv']
+    cases = frame.load['packages/nn/reference/expected/sched.csv']
+    out = []
+    for i in range[len[cases]]
+        name = str[cases.case[i]]
+        got = sched_row[name, str[cases.optimizer[i]], str[cases.metrics[i]], str[cases.cycles[i]] eq 'true', metrics]
+        want = held.expected['sched_`name`']
+        if len[got] ne len[want]
+            out = push[out, '`name` has `len[got]` numbers, the reference `len[want]`']
+        else
+            if not (got eq want)
+                gap = held.apart[got, want]
+                out = push[out, '`name` `gap`']
+    return out
+
+test schedules_agree_with_pytorch_exactly[]
+    sched_disagreements[] eq []
+
+--- the gradient's clipping -------------------------------------------------
+
+fn clipping[model, g, max_norm, norm_type]
+    return concat[math.tensor[[nn.total_norm[model, g, norm_type]]], nn.clip_grad_norm[model, g, max_norm, norm_type]]
+
+fn clip_disagreements[]
+    model = nn.sequential[[nn.linear[3, 4], nn.tanh[], nn.linear[4, 2]]]
+    g = math.load['packages/nn/reference/data/clip_g.csv'][0]
+    want = math.load['packages/nn/reference/expected/clip.csv']
+    rows = push[[], clipping[model, g, 0.5, 2.0]]
+    rows = push[rows, clipping[model, g, 100.0, 2.0]]
+    rows = push[rows, clipping[model, g, 0.5, math.inf]]
+    rows = push[rows, clipping[model, g, 0.7, 1.0]]
+    rows = push[rows, clipping[model, g, 0.9, 3.0]]
+    rows = push[rows, concat[math.zeros[1], nn.clip_grad_value[g, 0.3]]]
+    out = []
+    for i in range[len[rows]]
+        gap = held.apart[rows[i], want[i]]
+        if gap gt 0.000000000001
+            out = push[out, 'row `i` `gap`']
+    return out
+
+test gradients_are_clipped_as_pytorch_clips_them[]
+    clip_disagreements[] eq []
+
+--- a model's parameters by name are the ranges an optimizer's group takes,
+--- and a group made of them moves only them
+test a_group_takes_the_ranges_its_parameters_name[]
+    model = nn.sequential[[nn.linear[3, 4], nn.tanh[], nn.linear[4, 2]]]
+    theta = math.zeros[nn.size[model]]
+    encode[nn.ranges[model, ['0.weight', '2']]] eq '[[0,12],[16,8],[24,2]]'
+    opt = optim.sgd[theta, lr = 0.5]
+    opt = optim.grouped[opt, [optim.param_group[nn.ranges[model, ['0.bias']], map[]]]]
+    moved = optim.step[opt, theta + 1.0].theta
+    sum[slice[moved, 12, 16]] eq -2.0
+    sum[slice[moved, 0, 12]] + sum[slice[moved, 16, 26]] eq 0.0

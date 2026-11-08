@@ -1,0 +1,213 @@
+--- `use nn.init`: PyTorch's torch.nn.init — the values a parameter starts
+--- from, each a tensor of the shape asked (a list of sizes, PyTorch's
+--- order), drawn from the seeded generator. `nn.with_param` puts one in a
+--- model's theta: `theta = nn.with_param[model, theta, '0.weight',
+--- init.xavier_uniform[[4, 5]]]`. The draws are Crow's generator's, not
+--- PyTorch's, so a seeded run repeats itself, not PyTorch's numbers; the
+--- distributions, the bounds and the gains are PyTorch's. Every function is
+--- PyTorch's of the same name less its trailing underscore (a pie function
+--- answers a new tensor; nothing is written in place), with `mean` and
+--- `std` spelled `mu` and `sigma` (a parameter is never named like a
+--- builtin).
+use math as m
+use shapes
+
+--- a fan: the inputs and the outputs one number of a layer's weight meets
+struct Fans [ins, outs]
+
+--- calculate_gain[nonlinearity, param]: the gain PyTorch scales an
+--- initialization by for the nonlinearity that follows (param a leaky
+--- relu's slope)
+fn calculate_gain[nonlinearity, param = 0.01]
+    linear = ['linear', 'conv1d', 'conv2d', 'conv3d', 'conv_transpose1d', 'conv_transpose2d', 'conv_transpose3d', 'sigmoid']
+    if nonlinearity in linear
+        return 1.0
+    if nonlinearity eq 'tanh'
+        return 5.0 / 3.0
+    if nonlinearity eq 'relu'
+        return sqrt[2.0]
+    if nonlinearity eq 'leaky_relu'
+        return sqrt[2.0 / (1.0 + param * param)]
+    if nonlinearity eq 'selu'
+        return 3.0 / 4.0
+    halt['unsupported nonlinearity `nonlinearity`']
+
+--- fans[shape]: a weight's fan in and fan out, PyTorch's
+--- _calculate_fan_in_and_fan_out — a matrix's columns and rows, times the
+--- numbers of a kernel past the first two axes
+fn fans[shape]
+    if len[shape] lt 2
+        halt['fan in and fan out can not be computed for a tensor of fewer than 2 dimensions']
+    field = shapes.product[slice[shape, 2, len[shape]]]
+    return Fans[shape[1] * field, shape[0] * field]
+
+fn _fan[shape, mode]
+    f = fans[shape]
+    if mode eq 'fan_in'
+        return f.ins
+    if mode eq 'fan_out'
+        return f.outs
+    halt['mode `mode` not supported, please use one of fan_in, fan_out']
+
+--- the numbers of a tensor of `shape`, from a flat vector of them
+fn _shaped[flat, shape]
+    return shapes.laid[flat, shape]
+
+--- uniform[shape, a, b]: each number uniform on [a, b)
+fn uniform[shape, a = 0.0, b = 1.0]
+    return _shaped[m.uniform[a, b, shapes.product[shape]], shape]
+
+--- normal[shape, mu, sigma]: each number normal, of mean mu and standard
+--- deviation sigma
+fn normal[shape, mu = 0.0, sigma = 1.0]
+    return _shaped[m.randn[shapes.product[shape]] * sigma + mu, shape]
+
+--- constant[shape, value], ones[shape], zeros[shape]
+fn constant[shape, value]
+    return _shaped[m.zeros[shapes.product[shape]] + value, shape]
+
+fn ones[shape]
+    return constant[shape, 1.0]
+
+fn zeros[shape]
+    return constant[shape, 0.0]
+
+--- eye[shape]: a matrix's identity, 1 where row and column meet and 0
+--- elsewhere (rows and columns may differ)
+fn eye[shape]
+    if len[shape] ne 2
+        halt['only tensors with 2 dimensions are supported']
+    rows = shape[0]
+    cols = shape[1]
+    out = []
+    for i in range[rows]
+        for j in range[cols]
+            v = 0.0
+            if i eq j
+                v = 1.0
+            out = push[out, v]
+    return _shaped[m.tensor[out], shape]
+
+--- dirac[shape, groups]: a convolution's identity (3 to 5 axes): each of
+--- the first min(outs per group, ins) channels of a group passes its own
+--- input channel through the kernel's center
+fn dirac[shape, groups = 1]
+    axes = len[shape]
+    if axes lt 3 or axes gt 5
+        halt['only tensors with 3, 4, or 5 dimensions are supported']
+    if shape[0] % groups ne 0
+        halt['dim 0 must be divisible by groups']
+    per = shape[0] / groups
+    keep = min[per, shape[1]]
+    field = shapes.product[slice[shape, 2, axes]]
+    center = 0
+    for k in range[2, axes]
+        center = center * shape[k] + shape[k] / 2
+    ones_at = []
+    for g in range[groups]
+        for d in range[keep]
+            ones_at = push[ones_at, ((g * per + d) * shape[1] + d) * field + center]
+    out = []
+    for i in range[shapes.product[shape]]
+        v = 0.0
+        if i in ones_at
+            v = 1.0
+        out = push[out, v]
+    return _shaped[m.tensor[out], shape]
+
+--- xavier_uniform[shape, gain] and xavier_normal[shape, gain]: Glorot's,
+--- the standard deviation gain·√(2 / (fan in + fan out))
+fn xavier_uniform[shape, gain = 1.0]
+    f = fans[shape]
+    sigma = gain * sqrt[2.0 / float[f.ins + f.outs]]
+    bound = sqrt[3.0] * sigma
+    return uniform[shape, -bound, bound]
+
+fn xavier_normal[shape, gain = 1.0]
+    f = fans[shape]
+    return normal[shape, 0.0, gain * sqrt[2.0 / float[f.ins + f.outs]]]
+
+--- kaiming_uniform[shape, a, mode, nonlinearity] and kaiming_normal: He's,
+--- the standard deviation gain / √fan, the fan in or the fan out
+fn kaiming_uniform[shape, a = 0.0, mode = 'fan_in', nonlinearity = 'leaky_relu']
+    sigma = calculate_gain[nonlinearity, a] / sqrt[float[_fan[shape, mode]]]
+    bound = sqrt[3.0] * sigma
+    return uniform[shape, -bound, bound]
+
+fn kaiming_normal[shape, a = 0.0, mode = 'fan_in', nonlinearity = 'leaky_relu']
+    sigma = calculate_gain[nonlinearity, a] / sqrt[float[_fan[shape, mode]]]
+    return normal[shape, 0.0, sigma]
+
+--- the normal distribution's cumulative probability
+fn _cdf[x]
+    return (1.0 + m.erf[x / sqrt[2.0]]) / 2.0
+
+--- erfinv[y]: the inverse error function, element-wise on (−1, 1) —
+--- PyTorch's (ATen's calc_erfinv, Pavlis's translation of MATLAB's): a
+--- rational start, central within 0.7 and in the tails beyond, then two
+--- Newton steps on erf, in PyTorch's order of operations. Crow's erf is
+--- musl's, the same on every platform, where PyTorch's is the platform's:
+--- the two are an ulp apart at some numbers, and in the far tail a Newton
+--- step divides that ulp by erf's slope (7e-6 at 0.999999), so there the
+--- answers agree to 1e-11, and to the last digit or two elsewhere
+fn erfinv[y]
+    s = y * 0.0
+    central = m.abs[y] - 0.7 lte 0.0
+    z = y .* y
+    num = ((-0.140543331 * z + 0.914624893) .* z - 1.645349621) .* z + 0.886226899
+    dem = (((0.012229801 * z - 0.329097515) .* z + 1.442710462) .* z - 2.118377725) .* z + 1.0
+    inner = y .* num ./ dem
+    held = m.where[central, s + 0.5, m.abs[y]]
+    t = m.sqrt[-m.ln[(1.0 - held) / 2.0]]
+    tnum = ((1.641345311 * t + 3.429567803) .* t - 1.624906493) .* t - 1.970840454
+    tdem = (1.6370678 * t + 3.5438892) .* t + 1.0
+    outer = m.where[y - 0.0 lt 0.0, -tnum, tnum] ./ tdem
+    x = m.where[central, inner, outer]
+    slope = 2.0 / sqrt[m.pi]
+    x = x - (m.erf[x] - y) ./ (m.exp[-(x .* x)] * slope)
+    x = x - (m.erf[x] - y) ./ (m.exp[-(x .* x)] * slope)
+    return x
+
+--- trunc_normal[shape, mu, sigma, a, b]: normal of mean mu and standard
+--- deviation sigma, held to [a, b] — PyTorch's method: uniform between the
+--- bounds' probabilities, through the inverse of the normal's
+fn trunc_normal[shape, mu = 0.0, sigma = 1.0, a = -2.0, b = 2.0]
+    lo = _cdf[(a - mu) / sigma]
+    hi = _cdf[(b - mu) / sigma]
+    t = m.uniform[2.0 * lo - 1.0, 2.0 * hi - 1.0, shapes.product[shape]]
+    x = erfinv[t] * (sigma * sqrt[2.0]) + mu
+    return _shaped[m.clip[x, a, b], shape]
+
+--- orthogonal[shape, gain]: a matrix whose rows or columns (the fewer) are
+--- orthonormal, times gain — the Q of a normal matrix's QR, its columns'
+--- signs those of R's diagonal (a kernel's numbers past the first axis
+--- are its columns)
+fn orthogonal[shape, gain = 1.0]
+    if len[shape] lt 2
+        halt['only tensors with 2 or more dimensions are supported']
+    rows = shape[0]
+    cols = shapes.product[shape] / rows
+    flat = m.randn[rows, cols]
+    wide = rows lt cols
+    if wide
+        flat = m.transpose[flat]
+    parts = m.qr[flat]
+    signs = m.sign[m.diag[parts[1]]]
+    q = parts[0] .* m.reshape[signs, 1, len[signs]]
+    if wide
+        q = m.transpose[q]
+    return _shaped[q * gain, shape]
+
+--- sparse[shape, sparsity, sigma]: a matrix normal of standard deviation
+--- sigma with ⌈sparsity · rows⌉ of each column's numbers 0, the rows drawn
+fn sparse[shape, sparsity, sigma = 0.01]
+    if len[shape] ne 2
+        halt['only tensors with 2 dimensions are supported']
+    rows = shape[0]
+    cols = shape[1]
+    count = int[ceil[sparsity * float[rows]]]
+    x = m.randn[rows, cols] * sigma
+    for j in range[cols]
+        for i in m.choice[m.tensor[range[rows]], count]
+            x[int[i]][j] = 0.0
+    return x

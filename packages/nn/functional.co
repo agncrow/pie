@@ -1,0 +1,701 @@
+--- `use nn.functional`: the functions of tensors a network is written in,
+--- PyTorch's torch.nn.functional. Each is the formula PyTorch computes, in
+--- float64, written over crow's math builtins and differentiated by `grad`
+--- as any function is: there is no rule of its own, and a function with a
+--- kink is written with `where` of a mask, so its gradient at the kink is
+--- PyTorch's. A tensor may have any rank unless a function says; a `dim`
+--- counts from the end when it is negative. A loss answers a number, the
+--- mean of its terms or their sum (`reduction`); its `_each` form answers
+--- the term of each item, as PyTorch's `reduction='none'` does.
+use math
+use shapes
+
+--- zeros of x's shape (x times 0: its rank stays known)
+fn _zeros_like[x]
+    return x * 0.0
+
+--- x where it is no more than 0, and 0 elsewhere: what an exponential is
+--- taken of where only x ≤ 0 is kept, so the side not taken cannot
+--- overflow (`where` computes both, and 0 · ∞ is no gradient)
+fn _below[x]
+    return where[x gt 0.0, _zeros_like[x], x]
+
+--- exp(−x), x held above −709 so the exponential is finite: a sigmoid of
+--- a number below that is 0 to 300 digits, and its gradient stays one
+fn _exp_neg[x]
+    return exp[-clip[x, -709.0, inf]]
+
+--- relu[x]: max(0, x)
+fn relu[x]
+    return clip[x, 0.0, inf]
+
+--- relu6[x]: min(max(0, x), 6)
+fn relu6[x]
+    return clip[x, 0.0, 6.0]
+
+--- hardtanh[x]: x held to [lo, hi]; the gradient passes strictly inside
+--- them, as PyTorch's
+fn hardtanh[x, lo = -1.0, hi = 1.0]
+    return clip[x, lo, hi]
+
+--- leaky_relu[x]: x where it is positive, slope · x elsewhere
+fn leaky_relu[x, slope = 0.01]
+    return where[x gt 0.0, x, x * slope]
+
+--- elu[x]: x where it is positive, alpha · (exp(x) − 1) elsewhere
+fn elu[x, alpha = 1.0]
+    return where[x gt 0.0, x, expm1[_below[x]] * alpha]
+
+--- selu[x]: scale · elu(x, alpha), with PyTorch's two constants
+fn selu[x]
+    scale = 1.0507009873554804934193349852946
+    alpha = 1.6732632423543772848170429916717
+    return where[x gt 0.0, x * scale, expm1[_below[x]] * (alpha * scale)]
+
+--- celu[x]: x where it is positive, alpha · (exp(x / alpha) − 1) elsewhere
+fn celu[x, alpha = 1.0]
+    return where[x gt 0.0, x, expm1[_below[x] * (1.0 / alpha)] * alpha]
+
+--- gelu[x]: x · Φ(x), Φ the normal distribution's cumulative,
+--- 0.5 · (1 + erf(x / √2)); with approximate = 'tanh' PyTorch's tanh form,
+--- 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³)))
+fn gelu[x, approximate = 'none']
+    if approximate eq 'tanh'
+        inner = (x + x .* x .* x * 0.044715) * 0.7978845608028654
+        return x * 0.5 .* (1.0 + math.tanh[inner])
+    if approximate ne 'none'
+        halt['gelu: approximate is none or tanh, got `approximate`']
+    return x * 0.5 .* (1.0 + erf[x * 0.7071067811865476])
+
+--- sigmoid[x]: 1 / (1 + exp(−x))
+fn sigmoid[x]
+    return 1.0 / (1.0 + _exp_neg[x])
+
+--- silu[x]: x · sigmoid(x), x / (1 + exp(−x))
+fn silu[x]
+    return x ./ (1.0 + _exp_neg[x])
+
+--- softsign[x]: x / (1 + |x|)
+fn softsign[x]
+    return x ./ (1.0 + abs[x])
+
+--- softplus[x]: ln(1 + exp(beta · x)) / beta, and x itself where
+--- beta · x passes the limit (PyTorch's `threshold`, 20)
+fn softplus[x, beta = 1.0, limit = 20.0]
+    bx = x * beta
+    over = bx gt limit
+    return where[over, x, log1p[exp[where[over, _zeros_like[x], bx]]] / beta]
+
+--- mish[x]: x · tanh(softplus(x))
+fn mish[x]
+    return x .* math.tanh[softplus[x]]
+
+--- logsigmoid[x]: ln(sigmoid(x)), min(x, 0) − ln(1 + exp(−|x|)): each
+--- side smooth, so the gradient at 0 is 1/2
+fn logsigmoid[x]
+    up = x gte 0.0
+    pos = where[up, x, _zeros_like[x]]
+    neg = where[up, _zeros_like[x], x]
+    return where[up, -log1p[exp[-pos]], neg - log1p[exp[neg]]]
+
+--- tanhshrink[x]: x − tanh(x)
+fn tanhshrink[x]
+    return x - math.tanh[x]
+
+--- softshrink[x]: x − lambd above lambd, x + lambd below −lambd, 0 between
+fn softshrink[x, lambd = 0.5]
+    return where[x gt lambd, x - lambd, where[x lt -lambd, x + lambd, _zeros_like[x]]]
+
+--- hardshrink[x]: x outside [−lambd, lambd], 0 within
+fn hardshrink[x, lambd = 0.5]
+    return where[x gt lambd, x, where[x lt -lambd, x, _zeros_like[x]]]
+
+--- threshold[x, limit, value]: x above the limit, `value` elsewhere
+fn threshold[x, limit, value]
+    return where[x gt limit, x, _zeros_like[x] + value]
+
+--- hardsigmoid[x]: relu6(x + 3) / 6
+fn hardsigmoid[x]
+    return clip[x + 3.0, 0.0, 6.0] / 6.0
+
+--- hardswish[x]: x · relu6(x + 3) / 6, with PyTorch's gradient at ±3 (0
+--- at −3, 1 at 3)
+fn hardswish[x]
+    low = x lte -3.0
+    high = x gte 3.0
+    return where[low, x * 0.0, where[high, x * 6.0 / 6.0, x .* (x + 3.0) / 6.0]]
+
+--- prelu[x, weight]: x where it is positive, weight · x elsewhere: one
+--- weight, or one per channel (axis 1 of x)
+fn prelu[x, weight]
+    s = x.shape
+    if len[math.flatten[weight]] eq 1 or len[s] lt 2
+        return where[x gt 0.0, x, x .* weight]
+    dims = []
+    for i in range[len[s]]
+        d = 1
+        if i eq 1
+            d = s[1]
+        dims = push[dims, d]
+    per = shapes.laid[math.flatten[weight], dims]
+    return where[x gt 0.0, x, x .* per]
+
+--- narrow[x, dim, start, length]: the `length` items of axis `dim` from
+--- `start`, as PyTorch's narrow (a view there, the numbers read here; the
+--- gradient reaches them)
+fn narrow[x, dim, start, length]
+    a = shapes.axis[x, dim]
+    s = x.shape
+    if start lt 0 or length lt 0 or start + length gt s[a]
+        halt['narrow: items `start` to `start + length` of an axis of `s[a]`']
+    if a eq 0
+        return slice[x, start, start + length]
+    outer = shapes.product[slice[s, 0, a]]
+    inner = shapes.product[slice[s, a + 1, len[s]]]
+    first = reshape[tensor[range[outer]], outer, 1, 1] * float[s[a] * inner]
+    along = reshape[tensor[range[start, start + length]], 1, length, 1] * float[inner]
+    within = reshape[tensor[range[inner]], 1, 1, inner]
+    return shapes.laid[math.flatten[x[first + along + within]], shapes.with_size[s, a, length]]
+
+--- glu[x]: the first half of axis `dim` times the sigmoid of the second
+fn glu[x, dim = -1]
+    a = shapes.axis[x, dim]
+    n = x.shape[a]
+    if n % 2 ne 0
+        halt['glu: axis `a` holds `n` items, which do not halve']
+    return narrow[x, a, 0, n / 2] .* sigmoid[narrow[x, a, n / 2, n / 2]]
+
+--- softmax[x]: exp(x) / sum(exp(x)) along `dim`, its largest taken out of
+--- the exponentials first
+fn softmax[x, dim = -1]
+    a = shapes.axis[x, dim]
+    s = x.shape
+    ex = exp[x - shapes.kept[math.flatten[max[x, a]], s, a]]
+    return ex .* (1.0 / shapes.kept[math.flatten[sum[ex, a]], s, a])
+
+--- log_softmax[x]: x − ln(sum(exp(x))) along `dim`
+fn log_softmax[x, dim = -1]
+    a = shapes.axis[x, dim]
+    s = x.shape
+    shifted = x - shapes.kept[math.flatten[max[x, a]], s, a]
+    return shifted - shapes.kept[math.flatten[ln[sum[exp[shifted], a]]], s, a]
+
+--- softmin[x]: the softmax of −x
+fn softmin[x, dim = -1]
+    return softmax[-x, dim]
+
+--- the p-norm along axis `a` (2, 1 or any other p > 0), its gradient 0
+--- where the items are all 0, as PyTorch's
+fn _norm_along[x, p, a]
+    if p eq 1.0
+        return sum[abs[x], a]
+    if p eq 2.0
+        squares = sum[x .* x, a]
+        some = squares gt 0.0
+        root = sqrt[where[some, squares, _zeros_like[squares] + 1.0]]
+        return where[some, root, _zeros_like[squares]]
+    powers = sum[abs[x] .^ p, a]
+    some = powers gt 0.0
+    root = where[some, powers, _zeros_like[powers] + 1.0] .^ (1.0 / p)
+    return where[some, root, _zeros_like[powers]]
+
+--- normalize[x]: x over its p-norm along `dim`, the norm held no less
+--- than eps
+fn normalize[x, p = 2.0, dim = 1, eps = 0.000000000001]
+    a = shapes.axis[x, dim]
+    n = _norm_along[x, p, a]
+    return x ./ shapes.kept[math.flatten[where[n gt eps, n, n * 0.0 + eps]], x.shape, a]
+
+--- dropout[x]: each number kept with probability 1 − p and scaled by
+--- 1 / (1 − p), as PyTorch's; x itself when not training. The mask is drawn
+--- from the seeded generator as the function runs.
+fn dropout[x, p = 0.5, training = true]
+    if p lt 0.0 or p gt 1.0
+        halt['dropout: p is a probability from 0 to 1, got `p`']
+    if (not training) or p eq 0.0
+        return x
+    if p eq 1.0
+        return x * 0.0
+    keep = shapes.laid[math.flatten[bernoulli[1.0 - p, len[math.flatten[x]]]], x.shape]
+    return x .* (keep / (1.0 - p))
+
+--- linear[x, w, b]: x · wᵀ + b, the weight laid `[outs, ins]` as
+--- PyTorch's, x of any rank with ins its last axis
+fn linear[x, w, b = 0.0]
+    s = x.shape
+    outs = w.shape[0]
+    ins = w.shape[1]
+    if s[len[s] - 1] ne ins
+        halt['linear: x ends in `s[len[s] - 1]` features and the weight takes `ins`']
+    rows = len[math.flatten[x]] / ins
+    y = reshape[x, rows, ins] * transpose[reshape[w, outs, ins]] + b
+    return shapes.laid[math.flatten[y], push[slice[s, 0, len[s] - 1], outs]]
+
+--- bilinear[x1, x2, w, b]: x1ᵀ · w[k] · x2 + b[k] for each output k, the
+--- weight `[outs, in1, in2]`, x1 `[n, in1]` and x2 `[n, in2]`
+fn bilinear[x1, x2, w, b = 0.0]
+    outs = w.shape[0]
+    in1 = w.shape[1]
+    in2 = w.shape[2]
+    n = len[math.flatten[x1]] / in1
+    a = reshape[x1, n, in1]
+    c = reshape[x2, n, in2]
+    --- each output's x1ᵀ · w[k] · x2, the sum over in2 of (x1 · w[k]) .* x2,
+    --- joined as columns
+    y = reshape[sum[(a * reshape[narrow[w, 0, 0, 1], in1, in2]) .* c, 1], n, 1]
+    for k in range[1, outs]
+        wk = reshape[narrow[w, 0, k, 1], in1, in2]
+        y = concat[y, reshape[sum[(a * wk) .* c, 1], n, 1], axis = 1]
+    return y + b
+
+--- embedding[ids, w]: the rows of w at the ids (whole numbers), laid like
+--- the ids with the row's width last
+fn embedding[ids, w]
+    dim = w.shape[1]
+    n = len[math.flatten[ids]]
+    first = reshape[math.flatten[ids], n, 1] * float[dim]
+    cols = reshape[tensor[range[dim]], 1, dim]
+    return shapes.laid[math.flatten[w[first + cols]], push[ids.shape, dim]]
+
+--- one_hot[ids, classes]: a row of `classes` numbers for each id, 1 at
+--- the id
+fn one_hot[ids, classes]
+    return shapes.laid[math.flatten[onehot[math.flatten[ids], classes]], push[ids.shape, classes]]
+
+--- the mean of each row of a matrix, as a column
+fn _row_mean[z]
+    return reshape[mean[z, 1], len[z], 1]
+
+--- the biased variance of each row of a matrix about its mean `mu`, as a
+--- column
+fn _row_var[z, mu]
+    c = z - mu
+    return reshape[mean[c .* c, 1], len[z], 1]
+
+--- the numbers of x's last len(shape) axes, the axes a normalization
+--- reads (`shape` names them as PyTorch's normalized_shape does)
+fn _trailing[x, shape]
+    s = x.shape
+    k = len[shape]
+    if k gt len[s]
+        halt['a normalized shape of `k` axes, and x has `len[s]`']
+    return shapes.product[slice[s, len[s] - k, len[s]]]
+
+--- layer_norm[x, shape, w, b]: x over its last len(shape) axes, less their
+--- mean, over the root of their variance plus eps, scaled by w and moved
+--- by b (each of `shape`, or 1 and 0)
+fn layer_norm[x, shape, w = 1.0, b = 0.0, eps = 0.00001]
+    width = _trailing[x, shape]
+    rows = len[math.flatten[x]] / width
+    z = reshape[x, rows, width]
+    mu = _row_mean[z]
+    rstd = 1.0 / sqrt[_row_var[z, mu] + eps]
+    y = shapes.laid[math.flatten[(z - mu) .* rstd], x.shape]
+    return y .* w + b
+
+--- rms_norm[x, shape, w]: x over the root of the mean of its squares over
+--- its last len(shape) axes plus eps (PyTorch's float64 epsilon unless
+--- given), scaled by w
+fn rms_norm[x, shape, w = 1.0, eps = 0.0000000000000002220446049250313]
+    width = _trailing[x, shape]
+    rows = len[math.flatten[x]] / width
+    z = reshape[x, rows, width]
+    scale = 1.0 / sqrt[reshape[mean[z .* z, 1], rows, 1] + eps]
+    return shapes.laid[math.flatten[z .* scale], x.shape] .* w
+
+--- the shape that lays a channel's numbers `[c]` along axis 1 of a tensor
+--- of `axes` axes
+fn _channels[c, axes]
+    dims = []
+    for i in range[axes]
+        d = 1
+        if i eq 1
+            d = c
+        dims = push[dims, d]
+    return dims
+
+--- x `[N, C, …]` as `[N, C, M]`, M the numbers of a channel in one item
+fn _by_channel[x]
+    s = x.shape
+    return reshape[x, s[0], s[1], len[math.flatten[x]] / (s[0] * s[1])]
+
+--- the mean of each channel (axis 1) of x `[N, C, …]`, over the batch and
+--- every other axis
+fn batch_mean[x]
+    z = _by_channel[x]
+    return sum[sum[z, 2], 0] / float[len[z] * z.shape[2]]
+
+--- the biased variance of each channel of x about its mean `mu`
+fn batch_var[x, mu]
+    z = _by_channel[x]
+    d = z - reshape[mu, 1, z.shape[1], 1]
+    return sum[sum[d .* d, 2], 0] / float[len[z] * z.shape[2]]
+
+--- batch_norm[x, running_mean, running_var]: x `[N, C, …]` less each
+--- channel's mean, over the root of its variance plus eps, scaled by w and
+--- moved by b per channel. Training, the batch's own mean and biased
+--- variance; else the running ones given. (The running ones a training
+--- step leaves are nn.track's: a function answers one value.)
+fn batch_norm[x, running_mean, running_var, w = 1.0, b = 0.0, training = false, momentum = 0.1, eps = 0.00001]
+    s = x.shape
+    c = s[1]
+    laid = _channels[c, len[s]]
+    mu = running_mean
+    v = running_var
+    if training
+        mu = batch_mean[x]
+        v = batch_var[x, mu]
+    invstd = 1.0 / sqrt[v + eps]
+    y = (x - shapes.laid[math.flatten[mu], laid]) .* shapes.laid[math.flatten[invstd], laid]
+    return y .* shapes.laid[math.flatten[math.zeros[c] + w], laid] + shapes.laid[math.flatten[math.zeros[c] + b], laid]
+
+--- group_norm[x, groups]: x `[N, C, …]` normalized over each group of
+--- C / groups channels and every other axis, then scaled and moved per
+--- channel
+fn group_norm[x, groups, w = 1.0, b = 0.0, eps = 0.00001]
+    s = x.shape
+    n = s[0]
+    c = s[1]
+    if c % groups ne 0
+        halt['group_norm: `c` channels do not split into `groups` groups']
+    z = reshape[x, n * groups, len[math.flatten[x]] / (n * groups)]
+    mu = _row_mean[z]
+    y = shapes.laid[math.flatten[(z - mu) .* (1.0 / sqrt[_row_var[z, mu] + eps])], s]
+    laid = _channels[c, len[s]]
+    return y .* shapes.laid[math.flatten[math.zeros[c] + w], laid] + shapes.laid[math.flatten[math.zeros[c] + b], laid]
+
+--- instance_norm[x]: each channel of each item of x `[N, C, …]` over its
+--- own numbers
+fn instance_norm[x, w = 1.0, b = 0.0, eps = 0.00001]
+    return group_norm[x, x.shape[1], w, b, eps]
+
+--- cosine_similarity[x1, x2]: x1 · x2 over the product of their norms
+--- along `dim`, each norm held no less than eps
+fn cosine_similarity[x1, x2, dim = 1, eps = 0.00000001]
+    a = shapes.axis[x1, dim]
+    n1 = _norm_along[x1, 2.0, a]
+    n2 = _norm_along[x2, 2.0, a]
+    held1 = shapes.kept[math.flatten[where[n1 gt eps, n1, n1 * 0.0 + eps]], x1.shape, a]
+    held2 = shapes.kept[math.flatten[where[n2 gt eps, n2, n2 * 0.0 + eps]], x2.shape, a]
+    return sum[(x1 ./ held1) .* (x2 ./ held2), a]
+
+--- pairwise_distance[x1, x2]: the p-norm of x1 − x2 + eps along the last
+--- axis
+fn pairwise_distance[x1, x2, p = 2.0, eps = 0.000001]
+    d = x1 - x2 + eps
+    return _norm_along[d, p, len[d.shape] - 1]
+
+--- the losses -------------------------------------------------------------
+
+--- a loss's terms reduced: their mean or their sum
+fn _reduce[terms, reduction, name]
+    if reduction eq 'mean'
+        return mean[terms]
+    if reduction eq 'sum'
+        return sum[terms]
+    halt['`name`: reduction is mean or sum (`name`_each answers each term), got `reduction`']
+
+--- mse_loss: (x − target)²
+fn mse_loss_each[x, target]
+    d = x - target
+    return d .* d
+
+fn mse_loss[x, target, reduction = 'mean']
+    return _reduce[math.flatten[mse_loss_each[x, target]], reduction, 'mse_loss']
+
+--- l1_loss: |x − target|
+fn l1_loss_each[x, target]
+    return abs[x - target]
+
+fn l1_loss[x, target, reduction = 'mean']
+    return _reduce[math.flatten[l1_loss_each[x, target]], reduction, 'l1_loss']
+
+--- smooth_l1_loss: 0.5 · z² / beta where z = |x − target| is below
+--- beta, z − 0.5 · beta elsewhere
+fn smooth_l1_loss_each[x, target, beta = 1.0]
+    z = abs[x - target]
+    if beta eq 0.0
+        return z
+    return where[z lt beta, z .* z * 0.5 / beta, z - 0.5 * beta]
+
+fn smooth_l1_loss[x, target, reduction = 'mean', beta = 1.0]
+    return _reduce[math.flatten[smooth_l1_loss_each[x, target, beta]], reduction, 'smooth_l1_loss']
+
+--- huber_loss: 0.5 · z² where z = |x − target| is below delta,
+--- delta · (z − 0.5 · delta) elsewhere
+fn huber_loss_each[x, target, delta = 1.0]
+    z = abs[x - target]
+    return where[z lt delta, z .* z * 0.5, (z - 0.5 * delta) * delta]
+
+fn huber_loss[x, target, reduction = 'mean', delta = 1.0]
+    return _reduce[math.flatten[huber_loss_each[x, target, delta]], reduction, 'huber_loss']
+
+--- ln(x) held no lower than −100, as PyTorch's binary cross-entropy holds
+--- it: 0 reads as −100, never −∞
+fn _ln_floor[x]
+    pos = x gt 0.0
+    lnx = ln[where[pos, x, _zeros_like[x] + 1.0]]
+    least = _zeros_like[x] - 100.0
+    return where[pos, where[lnx gt -100.0, lnx, least], least]
+
+--- ln(1 − x), held as ln is above
+fn _ln1m_floor[x]
+    pos = x lt 1.0
+    l = log1p[-where[pos, x, _zeros_like[x]]]
+    least = _zeros_like[x] - 100.0
+    return where[pos, where[l gt -100.0, l, least], least]
+
+--- binary_cross_entropy: −(t · ln x + (1 − t) · ln(1 − x)) of
+--- probabilities x, each logarithm held no lower than −100; weighted by
+--- `weight`, which broadcasts
+fn binary_cross_entropy_each[x, target, weight = 1.0]
+    if min[x] lt 0.0 or max[x] gt 1.0
+        halt['binary_cross_entropy: x holds probabilities, from 0 to 1']
+    return ((target - 1.0) .* _ln1m_floor[x] - target .* _ln_floor[x]) .* weight
+
+fn binary_cross_entropy[x, target, weight = 1.0, reduction = 'mean']
+    return _reduce[math.flatten[binary_cross_entropy_each[x, target, weight]], reduction, 'binary_cross_entropy']
+
+--- binary_cross_entropy_with_logits: the binary cross-entropy of
+--- sigmoid(x), (1 − t) · x − ln(sigmoid(x)), the positives weighted by
+--- pos_weight and every term by weight
+fn binary_cross_entropy_with_logits_each[x, target, weight = 1.0, pos_weight = 1.0]
+    lw = (pos_weight - 1.0) .* target + 1.0
+    return ((1.0 - target) .* x - lw .* logsigmoid[x]) .* weight
+
+fn binary_cross_entropy_with_logits[x, target, weight = 1.0, reduction = 'mean', pos_weight = 1.0]
+    return _reduce[math.flatten[binary_cross_entropy_with_logits_each[x, target, weight, pos_weight]], reduction, 'binary_cross_entropy_with_logits']
+
+--- scores `[N, C]` of a batch, or `[C]` of one item as a batch of one
+fn _rows[x]
+    s = x.shape
+    if len[s] eq 1
+        return reshape[x, 1, s[0]]
+    if len[s] ne 2
+        halt['scores are [classes] or [batch, classes], got `len[s]` axes']
+    return reshape[x, s[0], s[1]]
+
+--- each row's number at its target class
+fn _picked[m, target]
+    n = m.shape[0]
+    c = m.shape[1]
+    return m[tensor[range[n]] * float[c] + math.flatten[target]]
+
+--- the classes as whole numbers from 0 to c − 1, one per row, or stop
+fn _classes[target, n, c, ignore_index]
+    t = math.flatten[target]
+    if len[t] ne n
+        halt['one target per row of scores (`n`), got `len[t]`']
+    kept = where[t eq ignore_index, _zeros_like[t], t]
+    if len[t] gt 0
+        if min[kept] lt 0.0 or max[kept] gte float[c] or max[abs[kept - round[kept]]] gt 0.0
+            halt['a target is a class of `c`, a whole number from 0 to `c - 1`']
+    return kept
+
+--- nll_loss: −w[t] · x[t] of log-probabilities `[N, C]` at each row's
+--- class t; a row whose target is ignore_index adds nothing
+fn nll_loss_each[x, target, weight = 1.0, ignore_index = -100]
+    m = _rows[x]
+    n = m.shape[0]
+    c = m.shape[1]
+    t = _classes[target, n, c, ignore_index]
+    counted = _counted[target, n, ignore_index]
+    w = (math.zeros[c] + weight)[t] .* counted
+    return -_picked[m, t] .* w
+
+--- 1 for each row whose target is a class, 0 where it is ignore_index
+fn _counted[target, n, ignore_index]
+    t = math.flatten[target]
+    return where[t eq ignore_index, math.zeros[n], math.ones[n]]
+
+--- the weight of each row's class, 0 where the row is ignored
+fn _row_weights[target, n, c, weight, ignore_index]
+    t = _classes[target, n, c, ignore_index]
+    counted = _counted[target, n, ignore_index]
+    return (math.zeros[c] + weight)[t] .* counted
+
+fn nll_loss[x, target, weight = 1.0, ignore_index = -100, reduction = 'mean']
+    terms = nll_loss_each[x, target, weight, ignore_index]
+    if reduction eq 'mean'
+        m = _rows[x]
+        return sum[terms] / sum[_row_weights[target, m.shape[0], m.shape[1], weight, ignore_index]]
+    return _reduce[math.flatten[terms], reduction, 'nll_loss']
+
+--- cross_entropy: the negative log-softmax of each row's scores at its
+--- class, or against a row of probabilities when the target is shaped as
+--- the scores; label_smoothing mixes in the uniform distribution, as
+--- PyTorch's
+fn cross_entropy_each[x, target, weight = 1.0, ignore_index = -100, label_smoothing = 0.0]
+    m = _rows[x]
+    n = m.shape[0]
+    c = m.shape[1]
+    logp = log_softmax[m, 1]
+    w = math.zeros[c] + weight
+    if target.shape eq x.shape
+        p = _rows[target]
+        if label_smoothing gt 0.0
+            p = p * (1.0 - label_smoothing) + label_smoothing / float[c]
+        return -sum[logp .* p .* reshape[w, 1, c], 1]
+    nll = nll_loss_each[logp, target, weight, ignore_index]
+    if label_smoothing eq 0.0
+        return nll
+    counted = _counted[target, n, ignore_index]
+    smooth = -sum[logp .* reshape[w, 1, c], 1] .* counted
+    return nll * (1.0 - label_smoothing) + smooth * (label_smoothing / float[c])
+
+fn cross_entropy[x, target, weight = 1.0, ignore_index = -100, reduction = 'mean', label_smoothing = 0.0]
+    if reduction ne 'mean' and reduction ne 'sum'
+        halt['cross_entropy: reduction is mean or sum (cross_entropy_each answers each term), got `reduction`']
+    m = _rows[x]
+    n = m.shape[0]
+    c = m.shape[1]
+    logp = log_softmax[m, 1]
+    w = math.zeros[c] + weight
+    if target.shape eq x.shape
+        p = _rows[target]
+        if label_smoothing gt 0.0
+            p = p * (1.0 - label_smoothing) + label_smoothing / float[c]
+        total = -sum[logp .* p .* reshape[w, 1, c]]
+        if reduction eq 'mean'
+            return total / float[n]
+        return total
+    nll = nll_loss[logp, target, weight, ignore_index, reduction]
+    if label_smoothing eq 0.0
+        return nll
+    counted = _counted[target, n, ignore_index]
+    smooth = sum[-sum[logp .* reshape[w, 1, c], 1] .* counted]
+    if reduction eq 'mean'
+        smooth = smooth / sum[_row_weights[target, n, c, weight, ignore_index]]
+    return nll * (1.0 - label_smoothing) + smooth * (label_smoothing / float[c])
+
+--- x · ln(y), 0 where x is 0
+fn _xlogy[x, y]
+    fx = math.flatten[x]
+    fy = math.flatten[y]
+    zero = fx eq 0.0
+    return shapes.laid[math.flatten[where[zero, fx * 0.0, fx .* ln[where[zero, fy * 0.0 + 1.0, fy]]]], x.shape]
+
+--- kl_div: target · (ln target − x) of log-probabilities `x`,
+--- or of log-probabilities on both sides with log_target; reduction
+--- 'batchmean' is the sum over the batch's size
+fn kl_div_each[x, target, log_target = false]
+    if log_target
+        return exp[target] .* (target - x)
+    return _xlogy[target, target] - target .* x
+
+fn kl_div[x, target, reduction = 'mean', log_target = false]
+    terms = kl_div_each[x, target, log_target]
+    if reduction eq 'batchmean'
+        return sum[terms] / float[x.shape[0]]
+    return _reduce[math.flatten[terms], reduction, 'kl_div']
+
+--- poisson_nll_loss: exp(x) − target · x of log-rates, or
+--- x − target · ln(x + eps) of rates; complete (PyTorch's full) adds Stirling's term
+--- where the target is above 1
+fn poisson_nll_loss_each[x, target, log_input = true, complete = false, eps = 0.00000001]
+    terms = exp[x] - target .* x
+    if not log_input
+        terms = x - target .* ln[x + eps]
+    if not complete
+        return terms
+    big = target gt 1.0
+    t = where[big, target, _zeros_like[target] + 1.0]
+    stirling = t .* ln[t] - t + ln[t * (2.0 * pi)] * 0.5
+    return terms + where[big, stirling, _zeros_like[target]]
+
+fn poisson_nll_loss[x, target, log_input = true, complete = false, eps = 0.00000001, reduction = 'mean']
+    return _reduce[math.flatten[poisson_nll_loss_each[x, target, log_input, complete, eps]], reduction, 'poisson_nll_loss']
+
+--- gaussian_nll_loss: 0.5 · (ln v + (x − target)² / v) of predicted
+--- means and variances v, each variance held no lower than eps
+fn gaussian_nll_loss_each[x, target, var, complete = false, eps = 0.000001]
+    if min[var] lt 0.0
+        halt['gaussian_nll_loss: a variance is negative']
+    v = where[var gt eps, var, _zeros_like[var] + eps]
+    d = x - target
+    terms = (ln[v] + d .* d ./ v) * 0.5
+    if complete
+        return terms + 0.5 * ln[2.0 * pi]
+    return terms
+
+fn gaussian_nll_loss[x, target, var, complete = false, eps = 0.000001, reduction = 'mean']
+    return _reduce[math.flatten[gaussian_nll_loss_each[x, target, var, complete, eps]], reduction, 'gaussian_nll_loss']
+
+--- margin_ranking_loss: max(0, −y · (x1 − x2) + margin), y 1 or −1
+fn margin_ranking_loss_each[x1, x2, y, margin = 0.0]
+    return relu[-y .* (x1 - x2) + margin]
+
+fn margin_ranking_loss[x1, x2, y, margin = 0.0, reduction = 'mean']
+    return _reduce[math.flatten[margin_ranking_loss_each[x1, x2, y, margin]], reduction, 'margin_ranking_loss']
+
+--- hinge_embedding_loss: x where y is 1, max(0, margin − x) where it is −1
+fn hinge_embedding_loss_each[x, y, margin = 1.0]
+    return where[y ne 1.0, relu[margin - x], _zeros_like[x]] + where[y ne -1.0, x, _zeros_like[x]]
+
+fn hinge_embedding_loss[x, y, margin = 1.0, reduction = 'mean']
+    return _reduce[math.flatten[hinge_embedding_loss_each[x, y, margin]], reduction, 'hinge_embedding_loss']
+
+--- soft_margin_loss: ln(1 + exp(−y · x))
+fn soft_margin_loss_each[x, y]
+    return log1p[exp[-y .* x]]
+
+fn soft_margin_loss[x, y, reduction = 'mean']
+    return _reduce[math.flatten[soft_margin_loss_each[x, y]], reduction, 'soft_margin_loss']
+
+--- multilabel_soft_margin_loss: the mean over the classes of
+--- −(y · ln sigmoid(x) + (1 − y) · ln sigmoid(−x)), one term per row
+fn multilabel_soft_margin_loss_each[x, y, weight = 1.0]
+    m = _rows[x]
+    t = _rows[y]
+    c = m.shape[1]
+    terms = -(t .* logsigmoid[m] + (1.0 - t) .* logsigmoid[-m]) .* reshape[math.zeros[c] + weight, 1, c]
+    return sum[terms, 1] / float[c]
+
+fn multilabel_soft_margin_loss[x, y, weight = 1.0, reduction = 'mean']
+    return _reduce[math.flatten[multilabel_soft_margin_loss_each[x, y, weight]], reduction, 'multilabel_soft_margin_loss']
+
+--- cosine_embedding_loss: 1 − cos(x1, x2) where y is 1, max(0, cos − margin)
+--- where it is −1, each row's cosine along axis 1
+fn cosine_embedding_loss_each[x1, x2, y, margin = 0.0]
+    eps = 0.000000000001
+    a = len[x1.shape] - 1
+    inner = sum[x1 .* x2, a]
+    mag = sqrt[(sum[x1 .* x1, a] + eps) .* (sum[x2 .* x2, a] + eps)]
+    cosine = inner ./ mag
+    return where[y eq 1.0, 1.0 - cosine, _zeros_like[cosine]] + where[y eq -1.0, relu[cosine - margin], _zeros_like[cosine]]
+
+fn cosine_embedding_loss[x1, x2, y, margin = 0.0, reduction = 'mean']
+    return _reduce[math.flatten[cosine_embedding_loss_each[x1, x2, y, margin]], reduction, 'cosine_embedding_loss']
+
+--- triplet_margin_loss: max(d(anchor, positive) − d(anchor, negative) +
+--- margin, 0), d the pairwise distance; swap takes the nearer of the two
+--- distances to the negative
+fn triplet_margin_loss_each[anchor, positive, negative, margin = 1.0, p = 2.0, eps = 0.000001, swap = false]
+    near = pairwise_distance[anchor, positive, p, eps]
+    far = pairwise_distance[anchor, negative, p, eps]
+    if swap
+        other = pairwise_distance[positive, negative, p, eps]
+        nearer = other - far
+        far = where[nearer lt 0.0, other, far]
+    return relu[margin + near - far]
+
+fn triplet_margin_loss[anchor, positive, negative, margin = 1.0, p = 2.0, eps = 0.000001, swap = false, reduction = 'mean']
+    return _reduce[math.flatten[triplet_margin_loss_each[anchor, positive, negative, margin, p, eps, swap]], reduction, 'triplet_margin_loss']
+
+--- multi_margin_loss: the sum over the classes i other than y of
+--- max(0, margin − x[y] + x[i])^p, weighted by w[y], over the classes
+fn multi_margin_loss_each[x, y, p = 1, margin = 1.0, weight = 1.0]
+    m = _rows[x]
+    n = m.shape[0]
+    c = m.shape[1]
+    t = _classes[y, n, c, -100]
+    own = reshape[_picked[m, t], n, 1]
+    gap = relu[m - own + margin]
+    if p eq 2
+        gap = gap .* gap
+    others = 1.0 - onehot[t, c]
+    w = reshape[(math.zeros[c] + weight)[t], n, 1]
+    return sum[gap .* others .* w, 1] / float[c]
+
+fn multi_margin_loss[x, y, p = 1, margin = 1.0, weight = 1.0, reduction = 'mean']
+    return _reduce[math.flatten[multi_margin_loss_each[x, y, p, margin, weight]], reduction, 'multi_margin_loss']

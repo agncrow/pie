@@ -1,0 +1,149 @@
+--- nn's layers held to PyTorch's torch.nn modules in float64
+--- (reference/reference.py, torch 2.8). Each case of
+--- reference/expected/models.csv is a model with its parameters given
+--- (reference/data/theta_<case>.csv, in PyTorch's order of parameters, the
+--- order nn.named lays theta in), run on fixed inputs in training or in
+--- evaluation, after a batch run in training first where the case says.
+--- Its row is the output's numbers, the gradient of the sum of the output
+--- times fixed weights with respect to theta and to each input of numbers,
+--- then each batch norm's running mean, running variance and count of
+--- batches after the run; and its parameters' names and sizes are
+--- PyTorch's. Every number agrees to 1e-12, relative above 1 and absolute
+--- below. `disagreements[]` is the check; pie's parity program 003 runs it
+--- compiled too.
+use math, frame
+use nn
+use functional as F
+use held
+
+--- the case's model, as nn makes it
+fn model_of[name]
+    if name eq 'mlp'
+        return nn.sequential[[nn.linear[5, 4], nn.relu[], nn.layer_norm[[4]], nn.linear[4, 3]]]
+    if name eq 'mlp_nobias'
+        return nn.sequential[[nn.linear[5, 4, bias = false], nn.gelu['tanh'], nn.linear[4, 2, bias = false]]]
+    if name eq 'bn_train' or name eq 'bn_eval' or name eq 'bn_twice'
+        return nn.sequential[[nn.linear[5, 4], nn.batch_norm[4], nn.tanh[], nn.linear[4, 2]]]
+    if name eq 'bn_image'
+        return nn.sequential[[nn.batch_norm[3, momentum = 0.3]]]
+    if name eq 'bn_plain'
+        return nn.sequential[[nn.batch_norm[5, affine = false], nn.linear[5, 2]]]
+    if name eq 'norms'
+        return nn.sequential[[nn.group_norm[1, 3], nn.prelu[3], nn.instance_norm[3, affine = true], nn.group_norm[3, 3]]]
+    if name eq 'embedding'
+        return nn.sequential[[nn.embedding[6, 3], nn.flatten[], nn.linear[9, 2]]]
+    if name eq 'rms'
+        return nn.sequential[[nn.linear[5, 4], nn.rms_norm[[4]], nn.silu[], nn.linear[4, 3]]]
+    if name eq 'pair'
+        return nn.module[map[dec = nn.linear[4, 3], enc = nn.linear[5, 4]]]
+    if name eq 'bilinear'
+        return nn.bilinear[3, 5, 2]
+    if name eq 'flatten'
+        return nn.sequential[[nn.flatten[], nn.linear[12, 2], nn.log_softmax[1]]]
+    if name eq 'dropout_eval'
+        return nn.sequential[[nn.linear[5, 4], nn.dropout[0.5], nn.relu[]]]
+    if name eq 'nested'
+        first = nn.sequential[[nn.linear[5, 4], nn.mish[]]]
+        second = nn.sequential[[nn.layer_norm[[4], bias = false], nn.linear[4, 2]]]
+        return nn.sequential[[first, second]]
+    return nn.sequential[[nn.elu[0.5], nn.hardtanh[-0.8, 0.9], nn.softplus[2.0], nn.leaky_relu[0.1], nn.softmax[0]]]
+
+
+--- the model's output, as its numbers: the embedding's ids are the
+--- constants' (an input of numbers would be differentiated), a model of
+--- parts by name runs as the reference's Pair does (dec of relu of enc)
+fn ran[name, model, theta, x, y, k]
+    if name eq 'embedding'
+        return math.flatten[nn.forward[model, theta, k.ids]]
+    if name eq 'pair'
+        --- (a model's answer has the rank its layers give it as it runs,
+        --- which no type states: a comparison inside relu reads a rank,
+        --- so the program states it — the encoder's is a matrix)
+        encoded = nn.forward[nn.part[model, 'enc'], theta, x]
+        h = F.relu[reshape[encoded, encoded.shape[0], encoded.shape[1]]]
+        return math.flatten[nn.forward[nn.part[model, 'dec'], theta, h]]
+    if name eq 'bilinear'
+        return math.flatten[nn.forward2[model, theta, x, y]]
+    return math.flatten[nn.forward[model, theta, x]]
+
+fn probe[name, model, theta, x, y, k, c]
+    return sum[ran[name, model, theta, x, y, k] .* c]
+
+--- the model's batch norms, in the order its modules come (PyTorch's
+--- modules(): a layer, then its parts')
+fn batch_norms[layer]
+    out = []
+    if layer.form eq 'batch_norm'
+        out = push[out, layer]
+    for p in layer.parts
+        for q in batch_norms[p]
+            out = push[out, q]
+    return out
+
+--- the case's row: the output, the gradients of theta and of the inputs it
+--- takes, then the buffers the run leaves
+fn row_of[name, model, theta, x, y, k, takes]
+    value = ran[name, model, theta, x, y, k]
+    gs = grad[probe][name, model, theta, x, y, k, held.weights_for[len[value]]]
+    --- (theta's own numbers: a model of none reads a placeholder of one)
+    row = concat[value, slice[math.flatten[gs[0]], 0, nn.size[model]]]
+    for i in range[takes]
+        row = concat[row, math.flatten[gs[i + 1]]]
+    --- (a model of parts by name runs by the program's own forward, and
+    --- holds no batch norm here)
+    if len[batch_norms[model]] gt 0
+        after = nn.tracked[model, theta, x]
+        for b in batch_norms[after]
+            c = b.ints[0]
+            row = concat[row, concat[nn.running_mean[b], nn.running_var[b]]]
+            row = concat[row, slice[b.held, 2 * c, 2 * c + 1]]
+    return row
+
+--- the case's row, its input as the model takes it: the image `[2, 3,
+--- 4]`, or a matrix — each by a call of its own, since one copy of a
+--- function holds one rank
+fn case_row[name, model, theta, xname, y, k, takes]
+    if xname eq 'img'
+        return row_of[name, model, theta, reshape[held.data['img'], 2, 3, 4], y, k, takes]
+    return row_of[name, model, theta, held.data[xname], y, k, takes]
+
+--- the model's parameters as the reference lists them: each name and its
+--- sizes, `0.weight:4x5` (`none` where it has none)
+fn names_of[model]
+    parts = []
+    for p in nn.named[model]
+        dims = []
+        for d in p.dims
+            dims = push[dims, str[d]]
+        shown = join[dims, 'x']
+        parts = push[parts, '`p.path`:`shown`']
+    if len[parts] eq 0
+        return 'none'
+    return join[parts, ' ']
+
+--- the cases whose rows, or whose parameters' names, are not the
+--- reference's
+fn disagreements[]
+    k = held.given[]
+    cases = frame.load['packages/nn/reference/expected/models.csv']
+    out = []
+    for i in range[len[cases]]
+        name = str[cases.case[i]]
+        model = model_of[name]
+        theta = math.flatten[held.data['theta_`name`']]
+        y = held.data[str[cases.y[i]]]
+        pre = str[cases.pre[i]]
+        if pre ne 'none'
+            model = nn.tracked[model, theta, held.data[pre]]
+        if str[cases.mode[i]] eq 'eval'
+            model = nn.eval[model]
+        gap = held.apart[case_row[name, model, theta, str[cases.x[i]], y, k, int[cases.takes[i]]], held.expected['model_`name`']]
+        if gap gt 0.000000000001
+            out = push[out, '`name` `gap`']
+        names = names_of[model]
+        if names ne str[cases.names[i]]
+            out = push[out, '`name` names `names`']
+    return out
+
+test nn_layers_agree_with_pytorch[]
+    disagreements[] eq []

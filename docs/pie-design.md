@@ -31,8 +31,7 @@ did.
 
 | Package | What it is | Held to |
 |---|---|---|
-| `nn` | tensors' activations, losses and layers; modules, the model as one parameter vector, initialisers, the functional forms | PyTorch (float64) |
-| `optim` | SGD (momentum, Nesterov, weight decay), Adam, AdamW, RMSprop, Adagrad, and the learning-rate schedules; gradient clipping | PyTorch |
+| `nn` | tensors' activations, losses and layers; modules, the model as one parameter vector, initialisers, the functional forms; `nn.optim` (SGD, Adam, AdamW, Adamax, NAdam, RAdam, RMSprop, Adagrad, Adadelta, ASGD, Rprop) and `nn.lr_scheduler`; gradient clipping | PyTorch (float64) |
 | `data` | datasets of tensors or frames, batches, seeded shuffles, splits | PyTorch's DataLoader order, given the order |
 | `stats` | descriptive statistics, correlation, tests, fits | scipy |
 | `models` | the classical models, metrics, cross-validation | scikit-learn |
@@ -69,6 +68,27 @@ g = grad[loss][theta, x, y]          --- loss.backward()
 opt = optim.step[opt, theta, g]      --- optimizer.step()
 theta = opt.theta
 ```
+
+## A forward pass hands its numbers flat
+
+A tensor's rank is in its type (crow's Design Note "rank is in the type"):
+a function's copy reads what it is handed by the rank its type says, and a
+tensor whose rank nothing states is checked where it is handed — it reaches
+the copy of its rank, or the call stops. A network's layers change the
+rank (a linear layer keeps it, `flatten` lowers it, an embedding raises
+it), so a forward pass recursing over a sequential model cannot hold one
+rank per call. Each layer therefore takes and hands its numbers flat, as a
+vector beside their sizes, a list of ints (`_run[layer, theta, v, dims]`),
+and lays them out itself, with literal sizes, at the rank it computes at:
+`reshape[v, len[v] / ins, ins]` for a linear layer, `[N, C, M]` for a
+layer over channels, `[before, size, after]` around a softmax's axis.
+`_after[layer, dims]` says the sizes a layer hands on.
+
+`nn.forward` lays the last layer's numbers out at the sizes the model ends
+with, so its answer has the right shape but no rank a type states: state
+it before indexing it, comparing it or handing it to a function that has
+copies for several ranks (`reshape[y, n, k]`, or `flatten[y]` for a
+vector), as `held_models.co` does. A loss takes it as it is.
 
 ## What crow had to grow
 

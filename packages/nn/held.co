@@ -1,0 +1,381 @@
+--- nn.functional held to PyTorch's torch.nn.functional in float64
+--- (reference/reference.py, torch 2.8). Each case of
+--- reference/expected/cases.csv is one function applied to fixed inputs
+--- (reference/data), and its row is the numbers of the value, then the
+--- gradient of the sum of the value times fixed weights — of the value
+--- itself where it is a number — with respect to each input the case
+--- compares. Every number agrees to 1e-12, relative above 1 and absolute
+--- below, unless the reference says why a case is held to less. `disagreements[]` is the check; pie's parity program 002 runs it
+--- compiled too.
+use math, frame
+use functional as F
+
+--- the constants the cases read beside their inputs: class indices (with
+--- and without an ignored row, and one item's), class weights, running
+--- statistics, labels of 1 and −1 and embedding ids
+struct Given [cls, ign, cls1, w5, rm, rv, pm4, pm45, ids]
+
+--- an input as its matrix (a vector is one row; a tensor of three axes
+--- its rows laid one after another), or a 1 × 1 zero where a case takes
+--- fewer inputs
+fn data[name]
+    if name eq 'none'
+        return math.zeros[1, 1]
+    t = math.load['packages/nn/reference/data/`name`.csv']
+    if not t.ok
+        return math.zeros[1, 1]
+    return t
+
+fn given[]
+    return Given[math.flatten[data['cls']], math.flatten[data['ign']], math.flatten[data['cls1']], math.flatten[data['w5']], math.flatten[data['rm']], math.flatten[data['rv']], math.flatten[data['pm4']], data['pm45'], data['ids']]
+
+--- the probabilities of a matrix's rows, as a matrix: pie's softmax lays
+--- its answer in a list of sizes, whose rank no type states, and a target
+--- of probabilities and one of classes are two ranks
+fn _probs[y]
+    return reshape[F.softmax[y, 1], y.shape[0], y.shape[1]]
+
+--- the reference's row of a case
+fn expected[name]
+    t = math.load['packages/nn/reference/expected/`name`.csv']
+    if not t.ok
+        return math.zeros[1]
+    return math.flatten[t]
+
+--- the image the normalization cases read, `[2, 3, 4]`
+fn img[x]
+    return reshape[x, 2, 3, 4]
+
+--- the cases that answer a tensor, each as its numbers
+fn applied[name, k, x, y, z, u]
+    if name eq 'relu'
+        return math.flatten[F.relu[x]]
+    if name eq 'relu6'
+        return math.flatten[F.relu6[x]]
+    if name eq 'hardtanh'
+        return math.flatten[F.hardtanh[x]]
+    if name eq 'hardtanh_half'
+        return math.flatten[F.hardtanh[x, -0.5, 0.5]]
+    if name eq 'leaky_relu'
+        return math.flatten[F.leaky_relu[x]]
+    if name eq 'leaky_relu_02'
+        return math.flatten[F.leaky_relu[x, 0.2]]
+    if name eq 'elu' or name eq 'elu_ext'
+        return math.flatten[F.elu[x]]
+    if name eq 'elu_2'
+        return math.flatten[F.elu[x, 2.0]]
+    if name eq 'selu'
+        return math.flatten[F.selu[x]]
+    if name eq 'celu'
+        return math.flatten[F.celu[x]]
+    if name eq 'celu_2'
+        return math.flatten[F.celu[x, 2.0]]
+    if name eq 'gelu' or name eq 'gelu_ext'
+        return math.flatten[F.gelu[x]]
+    if name eq 'gelu_tanh'
+        return math.flatten[F.gelu[x, 'tanh']]
+    if name eq 'sigmoid' or name eq 'sigmoid_ext'
+        return math.flatten[F.sigmoid[x]]
+    if name eq 'silu' or name eq 'silu_ext'
+        return math.flatten[F.silu[x]]
+    if name eq 'tanh' or name eq 'tanh_ext'
+        return math.flatten[math.tanh[x]]
+    if name eq 'softsign'
+        return math.flatten[F.softsign[x]]
+    if name eq 'softplus' or name eq 'softplus_ext'
+        return math.flatten[F.softplus[x]]
+    if name eq 'softplus_2_5'
+        return math.flatten[F.softplus[x, 2.0, 5.0]]
+    if name eq 'mish' or name eq 'mish_ext'
+        return math.flatten[F.mish[x]]
+    if name eq 'logsigmoid' or name eq 'logsigmoid_ext'
+        return math.flatten[F.logsigmoid[x]]
+    if name eq 'tanhshrink'
+        return math.flatten[F.tanhshrink[x]]
+    if name eq 'softshrink'
+        return math.flatten[F.softshrink[x]]
+    if name eq 'softshrink_1'
+        return math.flatten[F.softshrink[x, 1.0]]
+    if name eq 'hardshrink'
+        return math.flatten[F.hardshrink[x]]
+    if name eq 'hardshrink_1'
+        return math.flatten[F.hardshrink[x, 1.0]]
+    if name eq 'threshold'
+        return math.flatten[F.threshold[x, 0.5, -2.0]]
+    if name eq 'hardsigmoid'
+        return math.flatten[F.hardsigmoid[x]]
+    if name eq 'hardswish'
+        return math.flatten[F.hardswish[x]]
+    if name eq 'prelu_one' or name eq 'prelu_channels'
+        return math.flatten[F.prelu[x, math.flatten[y]]]
+    if name eq 'narrow'
+        return math.flatten[F.narrow[x, 1, 1, 3]]
+    if name eq 'narrow_0'
+        return math.flatten[F.narrow[x, 0, 1, 2]]
+    if name eq 'glu'
+        return math.flatten[F.glu[x]]
+    if name eq 'glu_0'
+        return math.flatten[F.glu[x, 0]]
+    if name eq 'softmax' or name eq 'softmax_big'
+        return math.flatten[F.softmax[x, -1]]
+    if name eq 'softmax_0'
+        return math.flatten[F.softmax[x, 0]]
+    if name eq 'softmax_3d'
+        return math.flatten[F.softmax[img[x], 1]]
+    if name eq 'log_softmax' or name eq 'log_softmax_big'
+        return math.flatten[F.log_softmax[x, -1]]
+    if name eq 'log_softmax_0'
+        return math.flatten[F.log_softmax[x, 0]]
+    if name eq 'softmin'
+        return math.flatten[F.softmin[x, -1]]
+    if name eq 'normalize' or name eq 'normalize_zero'
+        return math.flatten[F.normalize[x]]
+    if name eq 'normalize_p1'
+        return math.flatten[F.normalize[x, 1.0]]
+    if name eq 'normalize_p3'
+        return math.flatten[F.normalize[x, 3.0]]
+    if name eq 'normalize_0'
+        return math.flatten[F.normalize[x, dim = 0]]
+    if name eq 'linear'
+        return math.flatten[F.linear[x, y, math.flatten[z]]]
+    if name eq 'linear_nobias'
+        return math.flatten[F.linear[x, y]]
+    if name eq 'linear_3d'
+        return math.flatten[F.linear[reshape[x, 2, 4, 5], y, math.flatten[z]]]
+    if name eq 'bilinear'
+        return math.flatten[F.bilinear[x, y, reshape[z, 2, 5, 3], math.flatten[u]]]
+    if name eq 'embedding'
+        return math.flatten[F.embedding[k.ids, x]]
+    if name eq 'one_hot'
+        return math.flatten[F.one_hot[k.ids, 6]]
+    if name eq 'dropout_off'
+        return math.flatten[F.dropout[x, 0.5, false]]
+    if name eq 'dropout_none'
+        return math.flatten[F.dropout[x, 0.0]]
+    if name eq 'layer_norm'
+        return math.flatten[F.layer_norm[x, [5]]]
+    if name eq 'layer_norm_affine'
+        return math.flatten[F.layer_norm[x, [5], math.flatten[y], math.flatten[z]]]
+    if name eq 'layer_norm_2d'
+        return math.flatten[F.layer_norm[img[x], [3, 4], y, z]]
+    if name eq 'rms_norm'
+        return math.flatten[F.rms_norm[x, [5]]]
+    if name eq 'rms_norm_w'
+        return math.flatten[F.rms_norm[x, [5], math.flatten[y]]]
+    if name eq 'rms_norm_eps'
+        return math.flatten[F.rms_norm[x, [5], eps = 0.00001]]
+    if name eq 'batch_norm_train'
+        return math.flatten[F.batch_norm[img[x], k.rm, k.rv, math.flatten[y], math.flatten[z], true]]
+    if name eq 'batch_norm_eval'
+        return math.flatten[F.batch_norm[img[x], k.rm, k.rv, math.flatten[y], math.flatten[z]]]
+    if name eq 'batch_norm_2d'
+        return math.flatten[F.batch_norm[x, math.zeros[5], math.ones[5], training = true]]
+    if name eq 'group_norm'
+        return math.flatten[F.group_norm[reshape[x, 2, 4, 3], 2, math.flatten[y], math.flatten[z]]]
+    if name eq 'instance_norm'
+        return math.flatten[F.instance_norm[img[x]]]
+    if name eq 'instance_norm_affine'
+        return math.flatten[F.instance_norm[img[x], math.flatten[y], math.flatten[z]]]
+    if name eq 'cosine_similarity'
+        return math.flatten[F.cosine_similarity[x, y]]
+    if name eq 'cosine_similarity_0'
+        return math.flatten[F.cosine_similarity[x, y, 0]]
+    if name eq 'pairwise_distance'
+        return math.flatten[F.pairwise_distance[x, y]]
+    if name eq 'pairwise_distance_p1'
+        return math.flatten[F.pairwise_distance[x, y, 1.0]]
+    if name eq 'mse_each'
+        return math.flatten[F.mse_loss_each[x, y]]
+    if name eq 'bce_each'
+        return math.flatten[F.binary_cross_entropy_each[x, y]]
+    if name eq 'nll_each'
+        return math.flatten[F.nll_loss_each[x, k.ign, k.w5]]
+    if name eq 'ce_each'
+        return math.flatten[F.cross_entropy_each[x, k.ign, k.w5, label_smoothing = 0.1]]
+    if name eq 'ce_prob_each'
+        return math.flatten[F.cross_entropy_each[x, _probs[y], k.w5, label_smoothing = 0.2]]
+    if name eq 'kl_each'
+        return math.flatten[F.kl_div_each[F.log_softmax[x, 1], _probs[y]]]
+    if name eq 'multi_margin_each'
+        return math.flatten[F.multi_margin_loss_each[x, k.cls]]
+    if name eq 'triplet_each'
+        return math.flatten[F.triplet_margin_loss_each[x, y, z]]
+    if name eq 'cosine_embedding_each'
+        return math.flatten[F.cosine_embedding_loss_each[x, y, k.pm4, 0.2]]
+    halt['no tensor case named `name`']
+
+--- the cases that answer a number
+fn lost[name, k, x, y, z, u]
+    if name eq 'mse'
+        return F.mse_loss[x, y]
+    if name eq 'mse_sum'
+        return F.mse_loss[x, y, 'sum']
+    if name eq 'l1'
+        return F.l1_loss[x, y]
+    if name eq 'l1_sum'
+        return F.l1_loss[x, y, 'sum']
+    if name eq 'smooth_l1'
+        return F.smooth_l1_loss[x, y]
+    if name eq 'smooth_l1_half'
+        return F.smooth_l1_loss[x, y, beta = 0.5]
+    if name eq 'smooth_l1_0'
+        return F.smooth_l1_loss[x, y, beta = 0.0]
+    if name eq 'huber'
+        return F.huber_loss[x, y]
+    if name eq 'huber_half'
+        return F.huber_loss[x, y, delta = 0.5]
+    if name eq 'bce'
+        return F.binary_cross_entropy[x, y]
+    if name eq 'bce_w'
+        return F.binary_cross_entropy[x, y, k.w5]
+    if name eq 'bce_sum'
+        return F.binary_cross_entropy[x, y, reduction = 'sum']
+    if name eq 'bce_logits'
+        return F.binary_cross_entropy_with_logits[x, y]
+    if name eq 'bce_logits_w'
+        return F.binary_cross_entropy_with_logits[x, y, k.w5, pos_weight = k.w5 * 2.0]
+    if name eq 'nll'
+        return F.nll_loss[x, k.cls]
+    if name eq 'nll_w'
+        return F.nll_loss[x, k.cls, k.w5]
+    if name eq 'nll_ign'
+        return F.nll_loss[x, k.ign]
+    if name eq 'nll_ign_w'
+        return F.nll_loss[x, k.ign, k.w5]
+    if name eq 'nll_sum'
+        return F.nll_loss[x, k.ign, k.w5, reduction = 'sum']
+    if name eq 'ce'
+        return F.cross_entropy[x, k.cls]
+    if name eq 'ce_w'
+        return F.cross_entropy[x, k.cls, k.w5]
+    if name eq 'ce_ign'
+        return F.cross_entropy[x, k.ign]
+    if name eq 'ce_ls'
+        return F.cross_entropy[x, k.cls, label_smoothing = 0.1]
+    if name eq 'ce_ls_w_ign'
+        return F.cross_entropy[x, k.ign, k.w5, label_smoothing = 0.1]
+    if name eq 'ce_sum'
+        return F.cross_entropy[x, k.ign, k.w5, reduction = 'sum', label_smoothing = 0.1]
+    if name eq 'ce_prob'
+        return F.cross_entropy[x, _probs[y]]
+    if name eq 'ce_prob_ls'
+        return F.cross_entropy[x, _probs[y], label_smoothing = 0.2]
+    if name eq 'ce_prob_w'
+        return F.cross_entropy[x, _probs[y], k.w5]
+    if name eq 'ce_one'
+        return F.cross_entropy[math.flatten[x], k.cls1]
+    if name eq 'kl'
+        return F.kl_div[F.log_softmax[x, 1], _probs[y], 'batchmean']
+    if name eq 'kl_mean'
+        return F.kl_div[F.log_softmax[x, 1], _probs[y], 'mean']
+    if name eq 'kl_sum'
+        return F.kl_div[F.log_softmax[x, 1], _probs[y], 'sum']
+    if name eq 'kl_log_target'
+        return F.kl_div[F.log_softmax[x, 1], F.log_softmax[y, 1], 'batchmean', true]
+    if name eq 'poisson'
+        return F.poisson_nll_loss[x, y]
+    if name eq 'poisson_full'
+        return F.poisson_nll_loss[x, y, complete = true]
+    if name eq 'poisson_rates'
+        return F.poisson_nll_loss[x, y, log_input = false]
+    if name eq 'gaussian'
+        return F.gaussian_nll_loss[x, y, z]
+    if name eq 'gaussian_full'
+        return F.gaussian_nll_loss[x, y, z, complete = true]
+    if name eq 'margin_ranking'
+        return F.margin_ranking_loss[math.flatten[x], math.flatten[y], k.pm4, 0.5]
+    if name eq 'hinge_embedding'
+        return F.hinge_embedding_loss[x, k.pm45]
+    if name eq 'hinge_embedding_2'
+        return F.hinge_embedding_loss[x, k.pm45, 2.0]
+    if name eq 'soft_margin'
+        return F.soft_margin_loss[x, k.pm45]
+    if name eq 'multilabel_soft_margin'
+        return F.multilabel_soft_margin_loss[x, y]
+    if name eq 'multilabel_soft_margin_w'
+        return F.multilabel_soft_margin_loss[x, y, k.w5]
+    if name eq 'cosine_embedding'
+        return F.cosine_embedding_loss[x, y, k.pm4, 0.2]
+    if name eq 'triplet'
+        return F.triplet_margin_loss[x, y, z]
+    if name eq 'triplet_swap'
+        return F.triplet_margin_loss[x, y, z, swap = true]
+    if name eq 'triplet_p1'
+        return F.triplet_margin_loss[x, y, z, p = 1.0]
+    if name eq 'multi_margin'
+        return F.multi_margin_loss[x, k.cls]
+    if name eq 'multi_margin_p2'
+        return F.multi_margin_loss[x, k.cls, p = 2]
+    if name eq 'multi_margin_w'
+        return F.multi_margin_loss[x, k.cls, margin = 0.5, weight = k.w5]
+    halt['no number case named `name`']
+
+--- the weights a tensor case's value is summed with: whole eighths
+fn weights_for[n]
+    cs = for k in range[n]
+        float[(k * 7) % 11 - 5] / 4.0 + 0.125
+    return tensor[cs]
+
+--- a tensor case's value summed with the weights, which grad differentiates
+fn probe[name, k, x, y, z, u, c]
+    return sum[applied[name, k, x, y, z, u] .* c]
+
+--- a case's row: the value's numbers, then the gradients it compares
+fn row_of[name, answers, k, x, y, z, u, grads]
+    if answers eq 'number'
+        row = tensor[[lost[name, k, x, y, z, u]]]
+        if grads eq 0
+            return row
+        gs = grad[lost][name, k, x, y, z, u]
+        for i in range[grads]
+            row = concat[row, math.flatten[gs[i]]]
+        return row
+    value = applied[name, k, x, y, z, u]
+    if grads eq 0
+        return value
+    gs = grad[probe][name, k, x, y, z, u, weights_for[len[value]]]
+    row = value
+    for i in range[grads]
+        row = concat[row, math.flatten[gs[i]]]
+    return row
+
+--- the largest difference of two rows, relative where a number is above
+--- 1 and absolute below; a row of another length is apart by ∞
+fn apart[got, want]
+    if len[got] ne len[want]
+        return inf
+    return max[abs[got - want] ./ (abs[want] + 1.0)]
+
+--- the cases whose rows are not the reference's, each with its distance
+fn disagreements[]
+    k = given[]
+    cases = frame.load['packages/nn/reference/expected/cases.csv']
+    out = []
+    for i in range[len[cases]]
+        name = str[cases.case[i]]
+        got = row_of[name, str[cases.answers[i]], k, data[str[cases.x[i]]], data[str[cases.y[i]]], data[str[cases.z[i]]], data[str[cases.u[i]]], int[cases.grads[i]]]
+        gap = apart[got, expected[name]]
+        if gap gt float[cases.within[i]]
+            out = push[out, '`name` `gap`']
+    return out
+
+test nn_functional_agrees_with_pytorch[]
+    disagreements[] eq []
+
+--- dropout draws its mask from the seeded generator: each number kept
+--- with probability 1 − p and scaled by 1 / (1 − p), and its gradient is
+--- the mask it drew
+fn dropped[x]
+    return sum[F.dropout[x, 0.5]]
+
+test dropout_keeps_and_scales_as_pytorch_does[]
+    seed[11]
+    y = F.dropout[math.ones[4000], 0.25]
+    max[y] eq 1.0 / 0.75
+    min[y] eq 0.0
+    abs[mean[y] - 1.0] lt 0.05
+    F.dropout[math.ones[3], 1.0] eq math.zeros[3]
+    seed[5]
+    once = F.dropout[math.ones[50], 0.5]
+    seed[5]
+    grad[dropped][math.ones[50]] eq once

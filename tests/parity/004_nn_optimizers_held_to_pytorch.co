@@ -1,0 +1,8 @@
+--- nn.optim, nn.lr_scheduler and the gradient's clipping held to
+--- torch.optim and torch.nn.utils in both modes (held_optim.co's checks):
+--- 33 optimizers within 1e-12, 22 schedules exactly, 6 clippings within
+--- 1e-12, compiled as interpreted
+use nn.held_optim
+log[held_optim.optim_disagreements[]]
+log[held_optim.sched_disagreements[]]
+log[held_optim.clip_disagreements[]]

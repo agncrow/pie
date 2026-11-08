@@ -1,162 +1,751 @@
---- `use math.nn`: activations, losses and a linear layer — each the formula
---- the spec states, written over the math builtins (design rule 20) and
---- differentiated by `grad` as any function is. The builtin table
---- (src/table.rs, the rows of math.nn) states what each takes and answers;
---- a misuse stops the program with the reason, as a builtin's does. The
---- tests below are the module's own: `crow test src/modules/nn.co`.
-use math
+--- `use nn`: PyTorch's torch.nn. A layer is a record (`Layer`) made by a
+--- function named as PyTorch's class, in lowercase — `nn.linear[4, 8]` is
+--- nn.Linear(4, 8) — and a model is a layer of parts (`nn.sequential`,
+--- `nn.module`). Every parameter of a model is one flat tensor, theta:
+--- `nn.parameters[model]` draws PyTorch's default values from the seeded
+--- generator, laid as PyTorch's state_dict lays them (each layer's own
+--- first, then its parts'), and `nn.forward[model, theta, x]` runs the
+--- model reading each layer's parameters from theta, so
+--- `grad[loss][model, theta, batch]` differentiates every parameter at once
+--- (the model and a batch, records, are constants of the run). A layer's
+--- buffers — a batch norm's running statistics — are its record's own
+--- (`held`); `nn.tracked` answers the model with them moved by a batch, as
+--- PyTorch's forward pass moves them in training. The functions a model is
+--- written in are `nn.functional`'s.
+use math as m
+use functional, shapes
 
---- relu[x]: max(0, x), element-wise.
-fn relu[x]
-    x_t = tensor[x]
-    return clip[x_t, 0.0, inf]
+--- a layer: its form (`linear`, `relu`, `sequential`, …), its name in its
+--- parent, where its parameters begin in theta, how many are its own and
+--- how many in all (its own, then its parts'), its sizes, numbers, word
+--- and flags (each form's options, in the order its maker takes them),
+--- whether it trains, its buffers and its parts
+struct Layer [form, name, at, own, size, ints, floats, word, flags, training, held, parts]
 
---- sigmoid[x]: 1 / (1 + exp(-x)), element-wise.
-fn sigmoid[x]
-    x_t = tensor[x]
-    return 1.0 / (1.0 + exp[-x_t])
+--- a parameter: its name in the state (`0.weight`), where its numbers
+--- begin in theta, and its sizes
+struct Named [path, at, dims]
 
---- softmax[x]: exp(x) / sum(exp(x)) over the whole tensor, the largest
---- element taken out of the exponentials first so a large score does not
---- overflow.
-fn softmax[x]
-    x_t = tensor[x]
-    ex = exp[x_t - max[x_t]]
-    return ex / sum[ex]
+--- a list of ints and a list of floats, whatever list or vector they are
+--- given as (a list of whole numbers written down is a vector of them)
+fn _sizes[given]
+    out = []
+    for s in given
+        out = push[out, int[s]]
+    return out
 
---- gelu[x]: x · Φ(x), with Φ the normal distribution's cumulative,
---- 0.5 · (1 + erf(x / √2)), element-wise.
-fn gelu[x]
-    x_t = tensor[x]
-    return x_t .* (0.5 * (1.0 + erf[x_t / sqrt[2.0]]))
+fn _reals[given]
+    out = []
+    for v in given
+        out = push[out, float[v]]
+    return out
 
---- mse[pred, target]: the mean of the squared differences, the shapes
---- broadcasting as `-` does.
-fn mse[pred, target]
-    pred_t = tensor[pred]
-    d = pred_t - target
-    return mean[d .* d]
+--- a layer of no parts, holding `own` parameters
+fn _leaf[form, own, ints, floats, word, flags]
+    return Layer[form, '', 0, own, own, _sizes[ints], _reals[floats], word, flags, true, m.zeros[0], []]
 
---- bce[pred, target]: the binary cross-entropy of probabilities against
---- 0s and 1s, read as one series each; a probability is read within
---- [0.000000000001, 1 - 0.000000000001], so a sure wrong answer is a large loss, never an
---- infinite one.
-fn bce[pred, target]
-    pred_t = tensor[pred]
-    p = flatten[pred_t]
-    t = flatten[target]
-    n = len[p]
-    m = len[t]
-    if n ne m
-        halt['bce: pred and target must be one length, got `n` and `m`']
-    p = clip[p, 0.000000000001, 0.999999999999]
-    return -mean[t .* ln[p] + (1.0 - t) .* ln[1.0 - p]]
+--- a layer of no parameters and no parts
+fn _plain[form, ints, floats, word]
+    return _leaf[form, 0, ints, floats, word, [false]]
 
---- crossentropy[logits, targets]: the mean over the rows of
---- log(sum(exp(row))) − row[target], the row's largest score taken out of
---- the exponentials first. Logits `[classes]` with one target, or
---- `[batch, classes]` with a target per row, each a class 0 to classes − 1.
-fn crossentropy[logits, targets]
-    logits_t = tensor[logits]
-    targets_t = tensor[targets]
-    shape = logits_t.shape
-    axes = len[shape]
-    if axes gt 2 or axes eq 0
-        halt['crossentropy: logits are [classes] or [batch, classes], got `axes` dimensions']
-    batch = 1
-    classes = shape[0]
-    if axes eq 2
-        batch = shape[0]
-        classes = shape[1]
-    if classes eq 0
-        halt['crossentropy: the logits have no classes']
-    given = len[targets_t]
-    if given ne batch
-        halt['crossentropy: needs one target per row of logits (`batch`), got `given`']
-    least = min[targets_t]
-    most = max[targets_t]
-    last = classes - 1
-    if least lt 0.0
-        halt['crossentropy: target `least` is not a class of `classes` (0 to `last`)']
-    if most gte float[classes]
-        halt['crossentropy: target `most` is not a class of `classes` (0 to `last`)']
-    if max[abs[targets_t - round[targets_t]]] gt 0.0
-        halt['crossentropy: a target is not a whole number — each is a class of `classes` (0 to `last`)']
-    scores = reshape[logits_t, batch, classes]
-    hot = onehot[targets_t, classes]
-    top = reshape[max[scores, 1], batch, 1]
-    lse = ln[sum[exp[scores - top], 1]] + flatten[top]
-    picked = sum[scores .* hot, 1]
-    return mean[lse - picked]
+--- the layers ---------------------------------------------------------------
 
---- linear[x, w, b]: x * w + b, matrices x and w, the bias broadcasting.
-fn linear[x, w, b]
-    x_t = tensor[x]
-    w_t = tensor[w]
-    xs = x_t.shape
-    ws = w_t.shape
-    if len[xs] ne 2 or len[ws] ne 2
-        halt['linear: x and w are matrices, got shapes `xs` and `ws`']
-    cols = xs[1]
-    rows = ws[0]
-    if cols ne rows
-        halt['linear: x has `cols` columns and w `rows` rows — x * w needs them equal']
-    return x_t * w_t + b
+--- linear[ins, outs]: x · Wᵀ + b, W `[outs, ins]` (nn.Linear)
+fn linear[ins, outs, bias = true]
+    own = outs * ins
+    if bias
+        own = own + outs
+    return _leaf['linear', own, [ins, outs], [0.0], '', [bias]]
 
---- the formulas, at the values the book shows (docs/book/src/by-example/nn.md)
-test the_formulas_at_known_values[]
-    assert[sum[abs[relu[[-1.0, 0.5, 2.0]] - [0.0, 0.5, 2.0]]] eq 0.0]
-    assert[flatten[sigmoid[[0.0]]][0] eq 0.5]
-    assert[sum[abs[softmax[[1.0, 1.0]] - [0.5, 0.5]]] eq 0.0]
-    assert[abs[sum[softmax[[1000.0, 1001.0, 1002.0]]] - 1.0] lt 0.000000000001]
-    assert[abs[flatten[gelu[[1.0]]][0] - 0.8413447460685429] lt 0.000000000001]
-    assert[flatten[gelu[[0.0]]][0] eq 0.0]
-    assert[mse[[1.0, 2.0], [1.0, 4.0]] eq 2.0]
-    assert[mse[[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]] eq 0.0]
-    assert[abs[bce[[0.9, 0.1], [1.0, 0.0]] - 0.10536051565782628] lt 0.000000000001]
-    assert[bce[[1.0, 0.0], [1.0, 0.0]] lt 0.00000000001]
-    assert[bce[[0.0, 1.0], [1.0, 0.0]] gt 10.0]
-    assert[abs[crossentropy[[[2.0, 0.0]], [0.0]] - 0.12692801104297263] lt 0.000000000001]
-    assert[crossentropy[[10.0, 0.0, 0.0], [0.0]] lt 0.01]
-    assert[crossentropy[[0.0, 0.0, 10.0], [0.0]] gt 5.0]
-    assert[crossentropy[[[10.0, 0.0], [0.0, 10.0]], [0.0, 1.0]] lt 0.01]
-    assert[sum[abs[linear[[[1.0, 2.0]], [[1.0], [1.0]], [0.5]] - [[3.5]]]] eq 0.0]
+--- bilinear[in1, in2, outs]: x1ᵀ · W[k] · x2 + b[k], W `[outs, in1, in2]`
+--- (nn.Bilinear; run by nn.forward2, of two inputs)
+fn bilinear[in1, in2, outs, bias = true]
+    own = outs * in1 * in2
+    if bias
+        own = own + outs
+    return _leaf['bilinear', own, [in1, in2, outs], [0.0], '', [bias]]
 
---- what every activation and loss keeps true, over a spread of inputs
-test the_formulas_keep_their_laws[]
-    seed[7]
-    for turn in range[20]
-        x = randn[2, 5] * 3.0
-        assert[min[relu[x]] gte 0.0]
-        assert[sum[abs[relu[x] - relu[relu[x]]]] eq 0.0]
-        s = sigmoid[x]
-        assert[min[s] gt 0.0 and max[s] lt 1.0]
-        assert[sum[abs[s + sigmoid[-x] - 1.0]] lt 0.000000000001]
-        p = softmax[flatten[x]]
-        assert[abs[sum[p] - 1.0] lt 0.000000000001 and min[p] gt 0.0]
-        assert[sum[abs[p - softmax[flatten[x] + 100.0]]] lt 0.000000000001]
-        assert[sum[abs[gelu[x] - gelu[x]]] eq 0.0]
-        assert[max[abs[gelu[x] - relu[x]]] lt 0.2]
-        assert[mse[x, x] eq 0.0 and abs[mse[x, x + 1.0] - 1.0] lt 0.000000000001]
+--- embedding[count, dim]: a row of `dim` numbers for each of `count` ids
+--- (nn.Embedding)
+fn embedding[count, dim]
+    return _leaf['embedding', count * dim, [count, dim], [0.0], '', [false]]
 
---- a gradient through each formula agrees with central differences: the
---- formulas are differentiated as any function is, with no rule of their own
-fn _through_all[w, x, y, c]
-    h = reshape[gelu[relu[x * w] + 0.5], 4, 3]
-    s = sigmoid[flatten[h * [[1.0], [-1.0], [0.5]]]]
-    return bce[s, y] + mse[softmax[flatten[h]], 0.1] + crossentropy[h, c] + sum[linear[x, w, [0.1, 0.2, 0.3]]]
+--- layer_norm[shape]: each item over its last len(shape) axes, scaled and
+--- moved per number when affine (nn.LayerNorm)
+fn layer_norm[shape, eps = 0.00001, affine = true, bias = true]
+    n = shapes.product[shape]
+    own = 0
+    if affine
+        own = n
+        if bias
+            own = 2 * n
+    return _leaf['layer_norm', own, shape, [eps], '', [affine, bias]]
 
-test a_gradient_through_the_formulas_is_the_slope[]
-    x = [[0.3, -0.7], [1.1, 0.4], [-0.5, 0.9], [0.2, 0.2]]
-    y = [1.0, 0.0, 1.0, 0.0]
-    c = [0.0, 2.0, 1.0, 2.0]
-    w = [[0.5, -0.3, 0.8], [0.1, 0.9, -0.4]]
-    g = reshape[grad[_through_all][w, x, y, c][0], 2, 3]
-    for i in range[2]
-        for j in range[3]
-            up = tensor[w]
-            down = tensor[w]
-            up[i][j] = w[i][j] + 0.00001
-            down[i][j] = w[i][j] - 0.00001
-            slope = (_through_all[up, x, y, c] - _through_all[down, x, y, c]) / 0.00002
-            assert[abs[g[i][j] - slope] lt 0.00001]
+--- rms_norm[shape]: each item over the root mean square of its last
+--- len(shape) axes, scaled per number when affine (nn.RMSNorm)
+fn rms_norm[shape, eps = 0.0000000000000002220446049250313, affine = true]
+    own = 0
+    if affine
+        own = shapes.product[shape]
+    return _leaf['rms_norm', own, shape, [eps], '', [affine]]
+
+--- batch_norm[features]: each channel (axis 1) over the batch's mean and
+--- variance in training, over the running ones it keeps otherwise
+--- (nn.BatchNorm1d, 2d and 3d: one layer, any rank)
+fn batch_norm[features, eps = 0.00001, momentum = 0.1, affine = true, track = true]
+    own = 0
+    if affine
+        own = 2 * features
+    out = _leaf['batch_norm', own, [features], [eps, momentum], '', [affine, track]]
+    out.held = concat[concat[m.zeros[features], m.ones[features]], m.zeros[1]]
+    return out
+
+--- group_norm[groups, channels]: each item's channels in `groups` groups,
+--- each group over its own numbers (nn.GroupNorm)
+fn group_norm[groups, channels, eps = 0.00001, affine = true]
+    own = 0
+    if affine
+        own = 2 * channels
+    return _leaf['group_norm', own, [groups, channels], [eps], '', [affine]]
+
+--- instance_norm[features]: each channel of each item over its own
+--- numbers (nn.InstanceNorm1d, 2d and 3d; no running statistics)
+fn instance_norm[features, eps = 0.00001, affine = false]
+    own = 0
+    if affine
+        own = 2 * features
+    return _leaf['instance_norm', own, [features], [eps], '', [affine]]
+
+--- prelu[count]: x where positive, a learned slope times x elsewhere, one
+--- slope or one per channel (nn.PReLU)
+fn prelu[count = 1, init = 0.25]
+    return _leaf['prelu', count, [count], [init], '', [false]]
+
+--- dropout[p]: each number kept with probability 1 − p in training
+--- (nn.Dropout)
+fn dropout[p = 0.5]
+    return _plain['dropout', [0], [p], '']
+
+--- identity[]: x itself (nn.Identity)
+fn identity[]
+    return _plain['identity', [0], [0.0], '']
+
+--- flatten[start, end]: axes start to end joined into one (nn.Flatten)
+fn flatten[start = 1, end = -1]
+    return _plain['flatten', [start, end], [0.0], '']
+
+--- the activations, each nn.functional's function as a layer
+fn relu[]
+    return _plain['relu', [0], [0.0], '']
+
+fn relu6[]
+    return _plain['relu6', [0], [0.0], '']
+
+fn elu[alpha = 1.0]
+    return _plain['elu', [0], [alpha], '']
+
+fn selu[]
+    return _plain['selu', [0], [0.0], '']
+
+fn celu[alpha = 1.0]
+    return _plain['celu', [0], [alpha], '']
+
+fn gelu[approximate = 'none']
+    return _plain['gelu', [0], [0.0], approximate]
+
+fn sigmoid[]
+    return _plain['sigmoid', [0], [0.0], '']
+
+fn silu[]
+    return _plain['silu', [0], [0.0], '']
+
+fn mish[]
+    return _plain['mish', [0], [0.0], '']
+
+fn tanh[]
+    return _plain['tanh', [0], [0.0], '']
+
+fn softsign[]
+    return _plain['softsign', [0], [0.0], '']
+
+fn softplus[beta = 1.0, limit = 20.0]
+    return _plain['softplus', [0], [beta, limit], '']
+
+fn logsigmoid[]
+    return _plain['logsigmoid', [0], [0.0], '']
+
+fn tanhshrink[]
+    return _plain['tanhshrink', [0], [0.0], '']
+
+fn softshrink[lambd = 0.5]
+    return _plain['softshrink', [0], [lambd], '']
+
+fn hardshrink[lambd = 0.5]
+    return _plain['hardshrink', [0], [lambd], '']
+
+fn hardtanh[lo = -1.0, hi = 1.0]
+    return _plain['hardtanh', [0], [lo, hi], '']
+
+fn hardsigmoid[]
+    return _plain['hardsigmoid', [0], [0.0], '']
+
+fn hardswish[]
+    return _plain['hardswish', [0], [0.0], '']
+
+fn leaky_relu[slope = 0.01]
+    return _plain['leaky_relu', [0], [slope], '']
+
+fn threshold[limit, value]
+    return _plain['threshold', [0], [limit, value], '']
+
+fn glu[dim = -1]
+    return _plain['glu', [dim], [0.0], '']
+
+fn softmax[dim = -1]
+    return _plain['softmax', [dim], [0.0], '']
+
+fn log_softmax[dim = -1]
+    return _plain['log_softmax', [dim], [0.0], '']
+
+fn softmin[dim = -1]
+    return _plain['softmin', [dim], [0.0], '']
+
+--- the containers -----------------------------------------------------------
+
+--- a layer of parts placed after its own parameters, each part's at its
+--- offset in theta, recursively
+fn _placed[layer, at]
+    out = layer
+    out.at = at
+    next = at + layer.own
+    kids = []
+    for p in layer.parts
+        kids = push[kids, _placed[p, next]]
+        next = next + p.size
+    out.parts = kids
+    return out
+
+fn _container[form, parts]
+    total = 0
+    for p in parts
+        total = total + p.size
+    return _placed[Layer[form, '', 0, 0, total, _sizes[[0]], _reals[[0.0]], '', [false], true, m.zeros[0], parts], 0]
+
+--- sequential[parts]: each part run on what the one before answered, the
+--- parts named 0, 1, … (nn.Sequential)
+fn sequential[parts]
+    ordered = []
+    for i in range[len[parts]]
+        q = parts[i]
+        q.name = str[i]
+        ordered = push[ordered, q]
+    return _container['sequential', ordered]
+
+--- module[parts]: parts by name, a map of layers, for a forward function
+--- the program writes (nn.Module's attributes): nn.part finds each
+fn module[parts]
+    ordered = []
+    for k in keys[parts]
+        q = parts[k]
+        q.name = k
+        ordered = push[ordered, q]
+    return _container['module', ordered]
+
+--- part[model, name]: the part of that name
+fn part[model, name]
+    for p in model.parts
+        if p.name eq name
+            return p
+    halt['no part named `name`']
+
+--- size[model]: how many parameters the model holds
+fn size[model]
+    return model.size
+
+--- running a model -----------------------------------------------------------
+
+--- a slice of theta: n numbers from `at`
+fn _numbers[theta, at, n]
+    return slice[theta, at, at + n]
+
+--- forward[layer, theta, x]: the layer run on x, its parameters read from
+--- theta. Between layers the numbers go flat, their sizes beside them
+--- (`_run`, `_after`): a model's layers change the rank of what they hand
+--- on — a flatten, an embedding — and one copy of a function holds one
+--- rank, so each layer lays the numbers in the rank it computes at, as
+--- PyTorch's kernels view a tensor's storage
+fn forward[layer, theta, x]
+    dims = x.shape
+    return shapes.laid[_run[layer, theta, m.flatten[x], dims], _after[layer, dims]]
+
+--- a layer run on the flat numbers `v` of a tensor of sizes `dims`: its
+--- answer's numbers, flat (their sizes are `_after`'s)
+fn _run[layer, theta, v, dims]
+    f = layer.form
+    at = layer.at
+    if f eq 'sequential'
+        h = v
+        d = dims
+        for p in layer.parts
+            h = _run[p, theta, h, d]
+            d = _after[p, d]
+        return h
+    if f eq 'module'
+        halt['a model made by nn.module runs by a forward function the program writes, which runs its parts (nn.part)']
+    if f eq 'linear'
+        ins = layer.ints[0]
+        outs = layer.ints[1]
+        w = m.reshape[_numbers[theta, at, outs * ins], outs, ins]
+        x = m.reshape[v, len[v] / ins, ins]
+        if layer.flags[0]
+            return m.flatten[functional.linear[x, w, _numbers[theta, at + outs * ins, outs]]]
+        return m.flatten[functional.linear[x, w]]
+    if f eq 'embedding'
+        count = layer.ints[0]
+        dim = layer.ints[1]
+        return m.flatten[functional.embedding[v, m.reshape[_numbers[theta, at, count * dim], count, dim]]]
+    if f eq 'layer_norm' or f eq 'rms_norm'
+        n = shapes.product[layer.ints]
+        eps = layer.floats[0]
+        x = m.reshape[v, len[v] / n, n]
+        if f eq 'rms_norm'
+            if not layer.flags[0]
+                return m.flatten[functional.rms_norm[x, [n], 1.0, eps]]
+            return m.flatten[functional.rms_norm[x, [n], _numbers[theta, at, n], eps]]
+        if not layer.flags[0]
+            return m.flatten[functional.layer_norm[x, [n], 1.0, 0.0, eps]]
+        if not layer.flags[1]
+            return m.flatten[functional.layer_norm[x, [n], _numbers[theta, at, n], 0.0, eps]]
+        return m.flatten[functional.layer_norm[x, [n], _numbers[theta, at, n], _numbers[theta, at + n, n], eps]]
+    if f eq 'batch_norm'
+        c = layer.ints[0]
+        eps = layer.floats[0]
+        momentum = layer.floats[1]
+        batch = layer.training or not layer.flags[1]
+        mean_run = slice[layer.held, 0, c]
+        var_run = slice[layer.held, c, 2 * c]
+        x = _channeled[v, dims]
+        if not layer.flags[0]
+            return m.flatten[functional.batch_norm[x, mean_run, var_run, 1.0, 0.0, batch, momentum, eps]]
+        return m.flatten[functional.batch_norm[x, mean_run, var_run, _numbers[theta, at, c], _numbers[theta, at + c, c], batch, momentum, eps]]
+    if f eq 'group_norm'
+        groups = layer.ints[0]
+        c = layer.ints[1]
+        eps = layer.floats[0]
+        x = _channeled[v, dims]
+        if not layer.flags[0]
+            return m.flatten[functional.group_norm[x, groups, 1.0, 0.0, eps]]
+        return m.flatten[functional.group_norm[x, groups, _numbers[theta, at, c], _numbers[theta, at + c, c], eps]]
+    if f eq 'instance_norm'
+        c = layer.ints[0]
+        eps = layer.floats[0]
+        x = _channeled[v, dims]
+        if not layer.flags[0]
+            return m.flatten[functional.instance_norm[x, 1.0, 0.0, eps]]
+        return m.flatten[functional.instance_norm[x, _numbers[theta, at, c], _numbers[theta, at + c, c], eps]]
+    if f eq 'prelu'
+        w = _numbers[theta, at, layer.ints[0]]
+        if layer.ints[0] eq 1 or len[dims] lt 2
+            return functional.prelu[v, w]
+        return m.flatten[functional.prelu[_channeled[v, dims], w]]
+    if f eq 'dropout'
+        return functional.dropout[v, layer.floats[0], layer.training]
+    if f eq 'identity' or f eq 'flatten'
+        return v
+    if f eq 'glu' or f eq 'softmax' or f eq 'log_softmax' or f eq 'softmin'
+        x = _around[v, dims, layer.ints[0]]
+        if f eq 'glu'
+            return m.flatten[functional.glu[x, 1]]
+        if f eq 'softmax'
+            return m.flatten[functional.softmax[x, 1]]
+        if f eq 'log_softmax'
+            return m.flatten[functional.log_softmax[x, 1]]
+        return m.flatten[functional.softmin[x, 1]]
+    return _activated[layer, v]
+
+--- the sizes a layer answers, given the sizes of what it runs on
+fn _after[layer, dims]
+    f = layer.form
+    if f eq 'sequential'
+        d = dims
+        for p in layer.parts
+            d = _after[p, d]
+        return d
+    if f eq 'linear'
+        return shapes.with_size[dims, len[dims] - 1, layer.ints[1]]
+    if f eq 'embedding'
+        return push[dims, layer.ints[1]]
+    if f eq 'flatten'
+        a = shapes.axis_of[dims, layer.ints[0]]
+        b = shapes.axis_of[dims, layer.ints[1]]
+        out = slice[dims, 0, a]
+        out = push[out, shapes.product[slice[dims, a, b + 1]]]
+        for d in slice[dims, b + 1, len[dims]]
+            out = push[out, d]
+        return out
+    if f eq 'glu'
+        a = shapes.axis_of[dims, layer.ints[0]]
+        return shapes.with_size[dims, a, dims[a] / 2]
+    return dims
+
+--- flat numbers of sizes `dims` `[N, C, …]` laid `[N, C, M]`, M a
+--- channel's numbers in one item (an input `[N, C]` is `[N, C, 1]`)
+fn _channeled[v, dims]
+    if len[dims] lt 2
+        halt['a layer over channels takes N, C and more axes, and this has `len[dims]`']
+    return m.reshape[v, dims[0], dims[1], len[v] / (dims[0] * dims[1])]
+
+--- flat numbers of sizes `dims` laid `[before, size, after]` around the
+--- axis `dim` names: a function along one axis computes there as along it
+fn _around[v, dims, dim]
+    a = shapes.axis_of[dims, dim]
+    before = shapes.product[slice[dims, 0, a]]
+    after = shapes.product[slice[dims, a + 1, len[dims]]]
+    return m.reshape[v, before, dims[a], after]
+
+--- an activation layer run on x
+fn _activated[layer, x]
+    f = layer.form
+    v = layer.floats
+    if f eq 'relu'
+        return functional.relu[x]
+    if f eq 'relu6'
+        return functional.relu6[x]
+    if f eq 'elu'
+        return functional.elu[x, v[0]]
+    if f eq 'selu'
+        return functional.selu[x]
+    if f eq 'celu'
+        return functional.celu[x, v[0]]
+    if f eq 'gelu'
+        return functional.gelu[x, layer.word]
+    if f eq 'sigmoid'
+        return functional.sigmoid[x]
+    if f eq 'silu'
+        return functional.silu[x]
+    if f eq 'mish'
+        return functional.mish[x]
+    if f eq 'tanh'
+        return m.tanh[x]
+    if f eq 'softsign'
+        return functional.softsign[x]
+    if f eq 'softplus'
+        return functional.softplus[x, v[0], v[1]]
+    if f eq 'logsigmoid'
+        return functional.logsigmoid[x]
+    if f eq 'tanhshrink'
+        return functional.tanhshrink[x]
+    if f eq 'softshrink'
+        return functional.softshrink[x, v[0]]
+    if f eq 'hardshrink'
+        return functional.hardshrink[x, v[0]]
+    if f eq 'hardtanh'
+        return functional.hardtanh[x, v[0], v[1]]
+    if f eq 'hardsigmoid'
+        return functional.hardsigmoid[x]
+    if f eq 'hardswish'
+        return functional.hardswish[x]
+    if f eq 'leaky_relu'
+        return functional.leaky_relu[x, v[0]]
+    if f eq 'threshold'
+        return functional.threshold[x, v[0], v[1]]
+    if f eq 'glu'
+        return functional.glu[x, layer.ints[0]]
+    if f eq 'softmax'
+        return functional.softmax[x, layer.ints[0]]
+    if f eq 'log_softmax'
+        return functional.log_softmax[x, layer.ints[0]]
+    if f eq 'softmin'
+        return functional.softmin[x, layer.ints[0]]
+    halt['nn.forward: no layer of the form `f`']
+
+--- forward2[layer, theta, x1, x2]: a layer of two inputs run on them
+--- (nn.Bilinear)
+fn forward2[layer, theta, x1, x2]
+    if layer.form ne 'bilinear'
+        halt['nn.forward2 runs a layer of two inputs (bilinear), and this is `layer.form`']
+    in1 = layer.ints[0]
+    in2 = layer.ints[1]
+    outs = layer.ints[2]
+    at = layer.at
+    n = outs * in1 * in2
+    w = m.reshape[_numbers[theta, at, n], outs, in1, in2]
+    if layer.flags[0]
+        return functional.bilinear[x1, x2, w, _numbers[theta, at + n, outs]]
+    return functional.bilinear[x1, x2, w]
+
+--- param[model, theta, path]: a parameter by its name in the model's
+--- state (`weight`, `0.bias`), laid as PyTorch lays it
+fn param[model, theta, path]
+    for p in named[model]
+        if p.path eq path
+            return shapes.laid[m.flatten[_numbers[theta, p.at, shapes.product[p.dims]]], p.dims]
+    halt['no parameter `path` in a `model.form` layer']
+
+--- with_param[model, theta, path, value]: theta with the parameter of that
+--- name given value's numbers (an nn.init tensor, a trained one), the
+--- rest as they are
+fn with_param[model, theta, path, value]
+    for p in named[model]
+        if p.path eq path
+            n = shapes.product[p.dims]
+            given = m.flatten[value]
+            if len[given] ne n
+                halt['`path` holds `n` numbers, and the value given has `len[given]`']
+            return concat[concat[slice[theta, 0, p.at], given], slice[theta, p.at + n, len[theta]]]
+    halt['no parameter `path` in a `model.form` layer']
+
+--- the parameters --------------------------------------------------------------
+
+--- parameters[model]: theta, each parameter drawn as PyTorch draws it by default
+--- from the seeded generator: a linear layer's weight and bias uniform
+--- within ±1/√ins (kaiming_uniform with a = √5), a bilinear's within
+--- ±1/√in1, an embedding's normal, a normalization's weight 1 and bias 0,
+--- a prelu's its init
+fn parameters[model]
+    out = _own_drawn[model]
+    for p in model.parts
+        out = concat[out, parameters[p]]
+    --- (a vector, said so: the parts' answers come from this function
+    --- itself, which no rank is known of until it is typed)
+    return m.flatten[out]
+
+fn _own_drawn[layer]
+    f = layer.form
+    if f eq 'linear'
+        ins = layer.ints[0]
+        outs = layer.ints[1]
+        bound = 1.0 / sqrt[float[ins]]
+        w = m.uniform[-bound, bound, outs * ins]
+        if layer.flags[0]
+            return concat[w, m.uniform[-bound, bound, outs]]
+        return w
+    if f eq 'bilinear'
+        in1 = layer.ints[0]
+        in2 = layer.ints[1]
+        outs = layer.ints[2]
+        bound = 1.0 / sqrt[float[in1]]
+        w = m.uniform[-bound, bound, outs * in1 * in2]
+        if layer.flags[0]
+            return concat[w, m.uniform[-bound, bound, outs]]
+        return w
+    if f eq 'embedding'
+        return m.randn[layer.own]
+    if f eq 'layer_norm'
+        n = shapes.product[layer.ints]
+        if layer.own eq 2 * n
+            return concat[m.ones[n], m.zeros[n]]
+        return m.ones[layer.own]
+    if f eq 'rms_norm'
+        return m.ones[layer.own]
+    if f eq 'batch_norm' or f eq 'group_norm' or f eq 'instance_norm'
+        half = layer.own / 2
+        return concat[m.ones[half], m.zeros[half]]
+    if f eq 'prelu'
+        return m.zeros[layer.own] + layer.floats[0]
+    return m.zeros[0]
+
+--- named[model]: every parameter's name, place and sizes, in theta's
+--- order (PyTorch's named_parameters)
+fn named[model]
+    return _named_in[model, '']
+
+fn _named_in[layer, prefix]
+    out = _own_named[layer, prefix]
+    for p in layer.parts
+        for q in _named_in[p, join[[prefix, p.name, '.'], '']]
+            out = push[out, q]
+    return out
+
+fn _own_named[layer, prefix]
+    f = layer.form
+    at = layer.at
+    if f eq 'linear'
+        ins = layer.ints[0]
+        outs = layer.ints[1]
+        out = [Named['`prefix`weight', at, [outs, ins]]]
+        if layer.flags[0]
+            out = push[out, Named['`prefix`bias', at + outs * ins, [outs]]]
+        return out
+    if f eq 'bilinear'
+        in1 = layer.ints[0]
+        in2 = layer.ints[1]
+        outs = layer.ints[2]
+        out = [Named['`prefix`weight', at, [outs, in1, in2]]]
+        if layer.flags[0]
+            out = push[out, Named['`prefix`bias', at + outs * in1 * in2, [outs]]]
+        return out
+    if f eq 'embedding'
+        return [Named['`prefix`weight', at, layer.ints]]
+    if f eq 'layer_norm' or f eq 'rms_norm'
+        n = shapes.product[layer.ints]
+        out = []
+        if layer.own gt 0
+            out = push[out, Named['`prefix`weight', at, layer.ints]]
+        if layer.own eq 2 * n
+            out = push[out, Named['`prefix`bias', at + n, layer.ints]]
+        return out
+    if f eq 'batch_norm' or f eq 'group_norm' or f eq 'instance_norm'
+        half = layer.own / 2
+        out = []
+        if half gt 0
+            out = push[out, Named['`prefix`weight', at, [half]]]
+            out = push[out, Named['`prefix`bias', at + half, [half]]]
+        return out
+    if f eq 'prelu'
+        return [Named['`prefix`weight', at, layer.ints]]
+    return []
+
+--- ranges[model, paths]: the [at, size] ranges of theta the named
+--- parameters take, in theta's order, for an optimizer's group
+--- (`optim.param_group[nn.ranges[model, ['0.weight']], map[lr = 0.01]]`); a
+--- path naming a part (`0`, `encoder.1`) takes every parameter inside it
+fn ranges[model, paths]
+    out = []
+    for path in paths
+        found = false
+        for p in named[model]
+            if p.path eq path or starts[p.path, '`path`.']
+                out = push[out, [p.at, shapes.product[p.dims]]]
+                found = true
+        if not found
+            halt['no parameter or part `path` in a `model.form` layer']
+    return out
+
+--- the gradient ---------------------------------------------------------------
+
+--- total_norm[model, g]: the norm of the norms of g's parameters, each
+--- taken alone as PyTorch takes each parameter's gradient
+--- (torch.nn.utils.get_total_norm); norm_type m.inf is the largest number
+--- held
+fn total_norm[model, g, norm_type = 2.0]
+    if len[g] ne size[model]
+        halt['the gradient holds `len[g]` numbers and the model `size[model]`']
+    norms = []
+    for p in named[model]
+        piece = slice[g, p.at, p.at + shapes.product[p.dims]]
+        norms = push[norms, _vector_norm[piece, norm_type]]
+    return _vector_norm[m.tensor[norms], norm_type]
+
+fn _vector_norm[v, p]
+    if len[v] eq 0
+        return 0.0
+    if p eq m.inf
+        return m.max[m.abs[v]]
+    if p eq 2.0
+        return sqrt[m.sum[v .* v]]
+    if p eq 1.0
+        return m.sum[m.abs[v]]
+    return m.sum[m.abs[v] .^ p] ^ (1.0 / p)
+
+--- clip_grad_norm[model, g, max_norm]: g scaled so its total norm is at
+--- most max_norm (torch.nn.utils.clip_grad_norm_, which scales by
+--- max_norm / (norm + 1e-6) where that is below 1)
+fn clip_grad_norm[model, g, max_norm, norm_type = 2.0]
+    total = total_norm[model, g, norm_type]
+    coef = float[max_norm] / (total + 0.000001)
+    if coef gt 1.0
+        coef = 1.0
+    return g * coef
+
+--- clip_grad_value[g, clip_value]: each number of g held within
+--- ±clip_value (torch.nn.utils.clip_grad_value_)
+fn clip_grad_value[g, clip_value]
+    return m.clip[g, -float[clip_value], float[clip_value]]
+
+--- state[model, theta]: each parameter by its name, laid in its sizes
+--- (PyTorch's state_dict, the buffers aside)
+fn state[model, theta]
+    out = map[]
+    for p in named[model]
+        out[p.path] = shapes.laid[m.flatten[_numbers[theta, p.at, shapes.product[p.dims]]], p.dims]
+    return out
+
+--- from_state[model, given]: theta from parameters by name, as PyTorch's
+--- load_state_dict reads them: each named one present, of its number of
+--- numbers
+fn from_state[model, given]
+    out = m.zeros[0]
+    for p in named[model]
+        if not (p.path in given)
+            halt['no parameter `p.path` in the state given']
+        t = m.flatten[given[p.path]]
+        n = shapes.product[p.dims]
+        if len[t] ne n
+            halt['`p.path` holds `len[t]` numbers, and the model takes `n`']
+        out = concat[out, t]
+    return out
+
+--- training --------------------------------------------------------------------
+
+--- train[model] and eval[model]: the model with every layer training or not
+--- (a dropout drops, a batch norm reads the batch, only in training)
+fn train[model]
+    return _trained[model, true]
+
+fn eval[model]
+    return _trained[model, false]
+
+fn _trained[layer, on]
+    out = layer
+    out.training = on
+    kids = []
+    for p in layer.parts
+        kids = push[kids, _trained[p, on]]
+    out.parts = kids
+    return out
+
+--- a layer's output and the layer as running it leaves it
+struct Tracked [out, layer]
+
+--- tracked[model, theta, x]: the model with each training batch norm's
+--- running statistics moved by the batch x, as PyTorch's forward pass moves
+--- them (a sequential's parts in turn; a part of a model the program runs
+--- is tracked with its own input)
+fn tracked[model, theta, x]
+    return _tracked[model, theta, m.flatten[x], x.shape].layer
+
+--- (flat numbers and their sizes, as `_run` takes them)
+fn _tracked[layer, theta, v, dims]
+    if layer.form eq 'sequential'
+        h = v
+        d = dims
+        kids = []
+        for p in layer.parts
+            t = _tracked[p, theta, h, d]
+            h = t.out
+            d = _after[p, d]
+            kids = push[kids, t.layer]
+        out = layer
+        out.parts = kids
+        return Tracked[h, out]
+    return Tracked[_run[layer, theta, v, dims], _moved[layer, v, dims]]
+
+--- a training batch norm with its running mean and variance moved toward
+--- the batch's by its momentum (the variance unbiased, as PyTorch's), and its
+--- count of batches one more; any other layer as it is
+fn _moved[layer, numbers, dims]
+    if layer.form ne 'batch_norm' or not layer.training or not layer.flags[1]
+        return layer
+    c = layer.ints[0]
+    momentum = layer.floats[1]
+    x = _channeled[numbers, dims]
+    mu = functional.batch_mean[x]
+    v = functional.batch_var[x, mu]
+    n = len[numbers] / c
+    unbiased = v * (float[n] / float[n - 1])
+    held = layer.held
+    mean_run = slice[held, 0, c] * (1.0 - momentum) + mu * momentum
+    var_run = slice[held, c, 2 * c] * (1.0 - momentum) + unbiased * momentum
+    out = layer
+    out.held = concat[concat[mean_run, var_run], slice[held, 2 * c, 2 * c + 1] + 1.0]
+    return out
+
+--- running_mean[layer] and running_var[layer]: a batch norm's buffers
+fn running_mean[layer]
+    c = layer.ints[0]
+    return slice[layer.held, 0, c]
+
+fn running_var[layer]
+    c = layer.ints[0]
+    return slice[layer.held, c, 2 * c]

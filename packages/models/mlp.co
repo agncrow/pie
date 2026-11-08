@@ -3,18 +3,19 @@
 --- the gradient by `grad`, nothing written out. `x` holds a row of
 --- features per sample, `y` a 0 or 1 for each. The weights start from
 --- `seed`, so a fit is the same every run.
-use math, nn
+use math
+use nn.functional as F
 
 struct Net [w1, b1, w2, b2]
 
 --- the hidden layer, then the output's probability per sample
 fn forward[w1, b1, w2, b2, x]
-    h = nn.relu[x * w1 + b1]
-    return flatten[nn.sigmoid[h * w2 + b2]]
+    h = F.relu[x * w1 + b1]
+    return flatten[F.sigmoid[h * w2 + b2]]
 
 --- the mean binary cross-entropy of the probabilities against the targets
 fn loss[w1, b1, w2, b2, x, y]
-    return nn.bce[forward[w1, b1, w2, b2, x], y]
+    return F.binary_cross_entropy[forward[w1, b1, w2, b2, x], y]
 
 fn fit[x, y, hidden, steps, rate, seed_n]
     seed[seed_n]
