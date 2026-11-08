@@ -1,7 +1,7 @@
 --- Five notes as bag-of-words vectors over a small vocabulary, indexed,
 --- and the two nearest a question: the index is exact, so the answer is
---- the cosine's — with a model's embeddings in place of the counts (`use
---- llm`, `embed`), the same two calls make a retrieval step.
+--- the cosine's — with a model's embeddings in place of the counts
+--- (Raven's `llm.embed`), the same two calls make a retrieval step.
 use math
 use flat
 

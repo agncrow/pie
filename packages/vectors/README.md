@@ -54,4 +54,4 @@ python3 -m venv ~/.venvs/vectors
 `crow run packages/vectors/example.co` indexes five notes as
 bag-of-words vectors and prints the two nearest a question with their
 cosines — the same two calls a retrieval step over a model's embeddings
-makes (`use llm`, `embed`).
+makes (Raven's `llm.embed`, as Raven's examples/rag does).
