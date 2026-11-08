@@ -1,0 +1,54 @@
+--- A network trained under gpu[] (crow's GPU: the spec's GPU Support)
+--- answers what it answers on the CPU, to the digits of the f32 numbers
+--- the GPU computes in: a multilayer perceptron's forward pass and loss,
+--- its gradient through grad, and Adam's steps. Its tensors lie on the
+--- GPU where one answers, and on the CPU where none does, where the two
+--- runs are one. The CPU's run comes first, since gpu[] places every
+--- tensor made after it.
+use math
+use nn
+use functional as F
+use optim, rng
+
+struct Batch [x, y]
+
+struct Run [losses, theta]
+
+fn loss[model, theta, b]
+    return F.mse_loss[nn.forward[model, theta, b.x], b.y]
+
+--- the losses of `steps` steps of Adam from the model's first theta, and
+--- the theta they reach
+fn trained[model, b, steps]
+    theta = nn.parameters[model, rng.manual_seed[7]].values
+    opt = optim.adam[theta, lr = 0.01]
+    losses = []
+    for k in range[steps]
+        losses = push[losses, loss[model, opt.theta, b]]
+        opt = optim.step[opt, grad[loss][model, opt.theta, b]]
+    return Run[losses, opt.theta]
+
+--- sixteen rows of four numbers and their targets, drawn as torch draws
+fn batch[]
+    x = rng.normal[rng.manual_seed[3], 64]
+    y = rng.normal[x.generator, 16]
+    return Batch[math.reshape[x.values, 16, 4], math.reshape[y.values, 16, 1]]
+
+--- the largest difference of two lists' numbers, read on the CPU (made
+--- tensors under gpu[], both lists would be rounded to f32 first)
+fn apart[a, b]
+    most = 0.0
+    for i in range[len[a]]
+        most = max[most, abs[a[i] - b[i]]]
+    return most
+
+test a_network_trains_on_the_gpu_as_on_the_cpu[]
+    model = nn.sequential[[nn.linear[4, 8], nn.tanh[], nn.linear[8, 8], nn.relu[], nn.linear[8, 1]]]
+    here = trained[model, batch[], 6]
+    gpu[]
+    on = trained[model, batch[], 6]
+    here.theta.device eq 'cpu'
+    on.theta.device eq math.zeros[1].device
+    apart[on.losses, here.losses] lt 0.0001
+    max[abs[on.theta - here.theta]] lt 0.0001
+    on.losses[5] lt on.losses[0]

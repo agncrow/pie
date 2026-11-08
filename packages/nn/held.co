@@ -9,6 +9,7 @@
 --- compiled too.
 use math, frame
 use functional as F
+use rng
 
 --- the constants the cases read beside their inputs: class indices (with
 --- and without an ignored row, and one item's), class weights, running
@@ -362,20 +363,19 @@ fn disagreements[]
 test nn_functional_agrees_with_pytorch[]
     disagreements[] eq []
 
---- dropout draws its mask from the seeded generator: each number kept
---- with probability 1 − p and scaled by 1 / (1 − p), and its gradient is
---- the mask it drew
-fn dropped[x]
-    return sum[F.dropout[x, 0.5]]
+--- dropout keeps each number where its draw is 1 — the draws bernoulli(1
+--- − p) from a torch generator — and scales it by 1 / (1 − p); its
+--- gradient is what it kept, scaled
+fn dropped[x, noise]
+    return sum[F.dropout[x, 0.5, true, noise]]
 
 test dropout_keeps_and_scales_as_pytorch_does[]
-    seed[11]
-    y = F.dropout[math.ones[4000], 0.25]
+    y = F.dropout[math.ones[4000], 0.25, true, rng.bernoulli[rng.manual_seed[11], 4000, 0.75].values]
     max[y] eq 1.0 / 0.75
     min[y] eq 0.0
     abs[mean[y] - 1.0] lt 0.05
     F.dropout[math.ones[3], 1.0] eq math.zeros[3]
-    seed[5]
-    once = F.dropout[math.ones[50], 0.5]
-    seed[5]
-    grad[dropped][math.ones[50]] eq once
+    F.dropout[math.ones[3], 0.5, false] eq math.ones[3]
+    noise = rng.bernoulli[rng.manual_seed[5], 50, 0.5].values
+    once = F.dropout[math.ones[50], 0.5, true, noise]
+    grad[dropped][math.ones[50], noise][0] eq once

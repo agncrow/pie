@@ -1,17 +1,28 @@
---- A GPT trained on a slice of tiny Shakespeare from a draw of its own,
---- two thousand steps of descent (a few seconds interpreted), then a
---- hundred characters continued greedily from the text's first line
---- (docs/gpt-design.md).
-use math, nn
+--- nanoGPT's shakespeare_char run, made small: a GPT of two layers and two
+--- heads, 32 wide, over blocks of 16 characters of a slice of tiny
+--- Shakespeare, its weights drawn as nanoGPT's GPT(config) draws them from
+--- seed 1337, trained by nanoGPT's AdamW (configure_optimizers) on batches
+--- of eight blocks get_batch draws, then a hundred characters continued
+--- from the text's first line as nanoGPT's sample.py draws them — a
+--- temperature of 0.8, the ten likeliest (docs/gpt-design.md).
+use math as m
+use nn.rng
 use chars, model, train
 
 text = read['packages/gpt/reference/data/shakespeare_50k.txt']
 v = chars.vocab[text]
 ids = chars.tokens[text, v]
 log['`len[ids]` tokens, `len[v]` characters']
-fitted = train.fit[ids, len[v], model.init[len[v], 42], 2000, 0.5]
+net = model.gpt[model.config[block_size = 16, vocab_size = len[v], n_layer = 2, n_head = 2, n_embd = 32, bias = false]]
+theta = model.parameters[net, rng.manual_seed[1337]].values
+opt = model.configure_optimizers[net, theta, 0.1, 0.01, 0.9, 0.95]
+steps = 400
+fitted = train.fit_batches[net, opt, ids, steps, 8, rng.manual_seed[1338]]
 losses = fitted.losses
-log['loss at step 1: `fmt[losses[0], decimals = 4]`, at step 2000: `fmt[losses[1999], decimals = 4]`']
-prompt = chars.tokens['First Citizen:\n', v]
-continued = model.greedy[prompt, 100, len[v], fitted.weights]
+log['loss at step 1: `fmt[losses[0], decimals = 4]`, at step `steps`: `fmt[losses[steps - 1], decimals = 4]`']
+start = chars.tokens['First Citizen:\n', v]
+prompt = m.reshape[m.tensor[start], 1, len[start]]
+made = model.generate[net, fitted.opt.theta, prompt, 100, rng.manual_seed[42], temperature = 0.8, top_k = 10]
+continued = for x in m.flatten[made.idx]
+    int[x]
 log[chars.text_of[continued, v]]

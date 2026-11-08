@@ -14,13 +14,15 @@ fn vocab[text]
     return sort[keys[seen]]
 
 --- the text as ids: each character's index in the vocabulary; a character
---- the vocabulary lacks stops the program
+--- the vocabulary lacks is refused where it is read, and is the answer's
+--- failure
 fn tokens[text, vocabulary]
     at = map[]
     for i in range[len[vocabulary]]
         at = set[at, vocabulary[i], i]
-    ids = for ch in characters[text]
-        at[ch]
+    ids = []
+    for ch in characters[text]
+        ids = push[ids, at[ch]]
     return ids
 
 --- ids as text: each id's character

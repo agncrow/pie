@@ -19,7 +19,6 @@ __pycache__/
 docs/book/crow-site/
 !packages/retrieval/reference/data/*.csv
 !packages/retrieval/reference/expected/*.csv
-!packages/gpt/reference/data/*.csv
 !packages/gpt/reference/data/*.txt
 !packages/gpt/reference/expected/*.csv
 !packages/gpt/reference/expected/*.txt

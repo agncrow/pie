@@ -1,36 +1,41 @@
 --- The package held to nanoGPT in float64 (reference/reference.py): the
---- reference's own initial weights loaded, the same tokens, the logits of
---- the first block and the loss at those weights, the loss before each of
---- twenty steps of descent at lr 0.1, and the greedy continuation of the
---- first block at the final weights. Numbers agree to 1e-9 relative (a
---- matrix product's accumulation order is the BLAS's own); tokens and
---- characters exactly.
+--- weights its GPT(config) draws from seed 1337, read from its own state
+--- (safetensors, by nanoGPT's names); the tokens; the logits and the loss
+--- at those weights; the loss before each of twenty steps of SGD and after
+--- them; fifty ids generate draws at the SGD's weights; the loss before
+--- each of twenty steps of nanoGPT's AdamW on batches of four blocks
+--- get_batch draws; and, with shakespeare_char's dropout, five steps of
+--- AdamW in training, ten ids generated in training and the loss in eval
+--- after them. Numbers agree to 1e-9 relative (a matrix product's
+--- accumulation order is the BLAS's own), the weights drawn to two units
+--- of the last place, the tokens and the ids exactly.
 use math, nn
+use nn.rng, nn.optim, nn.safetensors
 use chars, model, train
-
-fn weights[]
-    names = ['w00_wte', 'w01_wpe', 'w02_g1_0', 'w03_q0_0', 'w04_k0_0', 'w05_v0_0', 'w06_o0_0', 'w07_q1_0', 'w08_k1_0', 'w09_v1_0', 'w10_o1_0', 'w11_g2_0', 'w12_w1_0', 'w13_w2_0', 'w14_g1_1', 'w15_q0_1', 'w16_k0_1', 'w17_v0_1', 'w18_o0_1', 'w19_q1_1', 'w20_k1_1', 'w21_v1_1', 'w22_o1_1', 'w23_g2_1', 'w24_w1_1', 'w25_w2_1', 'w26_gf']
-    loaded = for name in names
-        weight_of[name]
-    return loaded
-
---- one weight loaded: a table that cannot be read is a wrong answer of
---- the right kind, which the first comparison then says (a guard that
---- returns narrows the value to the tensor it holds)
-fn weight_of[name]
-    t = load['packages/gpt/reference/data/`name`.csv']
-    if not t.ok
-        return zeros[1, 1]
-    return t
 
 fn corpus[]
     return read['packages/gpt/reference/data/shakespeare_50k.txt']
 
---- a row of a loaded table as a list of ints
-fn ints_of[table]
-    ints = for x in flatten[table]
-        int[x]
-    return ints
+fn expected[name]
+    return load['packages/gpt/reference/expected/`name`.csv']
+
+--- the reference's configuration
+fn small[]
+    return model.gpt[model.config[block_size = 16, vocab_size = 59, n_layer = 2, n_head = 2, n_embd = 32, bias = false]]
+
+--- the reference's weights at seed 1337, as its checkpoint holds them
+fn initial[net]
+    return model.load[net, safetensors.load_file['packages/gpt/reference/expected/init.safetensors']]
+
+fn ids[]
+    return chars.tokens[corpus[], chars.vocab[corpus[]]]
+
+--- a table's numbers as a list of ints
+fn ints_of[t]
+    out = []
+    for x in math.flatten[t]
+        out = push[out, int[x]]
+    return out
 
 --- the largest relative difference between two tensors of one shape
 fn apart[a, b]
@@ -41,36 +46,72 @@ test the_tokens_are_the_references[]
     v = chars.vocab[corpus[]]
     len[v] eq 59
     v eq chars.characters[read['packages/gpt/reference/expected/vocab.txt']]
-    ids = chars.tokens[corpus[], v]
-    expected = ints_of[load['packages/gpt/reference/expected/tokens.csv']]
-    slice[ids, 0, 17] eq expected
+    slice[ids[], 0, 17] eq ints_of[expected['tokens']]
 
---- the logits and the loss at the reference's weights
+--- the widest gap between two tensors' numbers, in units of the last
+--- place of the second's
+fn ulps_apart[got, want]
+    far = 0.0
+    for i in range[len[want]]
+        d = abs[got[i] - want[i]]
+        if d gt 0.0
+            far = max[far, d / (abs[want[i]] * 0.0000000000000002220446049250313)]
+    return far
+
+--- the weights drawn from seed 1337 are nanoGPT's, each number within two
+--- units in its last place: a draw of normal_ goes through libm's log, cos
+--- and sin, whose last digit two builds may round apart (nn.rng holds a
+--- draw to one unit, held_rng.co), and its scaling by the std rounds once
+--- more (22 of the 27,136 numbers differ, the widest by 1.55)
+test the_weights_drawn_are_nanogpts[]
+    net = small[]
+    got = model.parameters[net, rng.manual_seed[1337]].values
+    want = initial[net]
+    len[got] eq len[want]
+    ulps_apart[got, want] lte 2.0
+
+--- the logits and the loss of the first block at those weights
 test the_logits_at_init_are_the_references[]
-    v = chars.vocab[corpus[]]
-    ids = chars.tokens[corpus[], v]
-    ws = weights[]
-    block = slice[ids, 0, 16]
-    after = slice[ids, 1, 17]
-    got = model.logits_of[block, 59, ws]
-    want = load['packages/gpt/reference/expected/logits0.csv']
-    got.shape eq [16, 59]
-    apart[got, want] lt 0.000000001
-    l = model.loss_of[block, after, 59, ws]
-    want_loss = load['packages/gpt/reference/expected/loss0.csv'][0][0]
-    abs[l - want_loss] lt 0.000000001
+    net = small[]
+    theta = initial[net]
+    b = train.in_order[ids[], 0, 16]
+    got = model.logits[net, theta, b.x]
+    got.shape eq [1, 16, 59]
+    apart[math.reshape[got, 16, 59], expected['logits0']] lt 0.000000001
+    abs[model.loss[net, theta, b.x, b.y] - expected['loss0'][0][0]] lt 0.000000001
 
---- twenty steps of descent follow the reference's losses, and the
---- continuation at the final weights is the reference's
-test twenty_steps_follow_the_reference[]
-    v = chars.vocab[corpus[]]
-    ids = chars.tokens[corpus[], v]
-    fitted = train.fit[ids, 59, weights[], 20, 0.1]
-    losses = fitted.losses
-    want = flatten[load['packages/gpt/reference/expected/losses.csv']]
-    len[losses] eq 20
-    apart[tensor[losses], want] lt 0.000000001
-    after = model.loss_of[slice[ids, 0, 16], slice[ids, 1, 17], 59, fitted.weights]
-    abs[after - load['packages/gpt/reference/expected/loss_after.csv'][0][0]] lt 0.000000001
-    continued = model.greedy[slice[ids, 0, 16], 50, 59, fitted.weights]
-    continued eq ints_of[load['packages/gpt/reference/expected/greedy.csv']]
+--- twenty steps of SGD follow the reference's losses, and fifty ids drawn
+--- at the weights they reach are the reference's
+test twenty_steps_of_sgd_and_a_generation_follow_the_reference[]
+    net = small[]
+    fitted = train.fit[net, optim.sgd[initial[net], lr = 0.1], ids[], 20, rng.manual_seed[0]]
+    len[fitted.losses] eq 20
+    apart[math.tensor[fitted.losses], math.flatten[expected['sgd_losses']]] lt 0.000000001
+    b = train.in_order[ids[], 0, 16]
+    abs[train.batch_loss[net, fitted.opt.theta, b] - expected['sgd_after'][0][0]] lt 0.000000001
+    made = model.generate[net, fitted.opt.theta, b.x, 50, rng.manual_seed[7], temperature = 0.8, top_k = 10]
+    slice[ints_of[made.idx], 16, 66] eq ints_of[expected['generated']]
+
+--- twenty steps of nanoGPT's AdamW, each on four blocks get_batch draws,
+--- follow the reference's losses
+test twenty_steps_of_adamw_follow_the_reference[]
+    net = small[]
+    opt = model.configure_optimizers[net, initial[net], 0.1, 0.01, 0.9, 0.95]
+    fitted = train.fit_batches[net, opt, ids[], 20, 4, rng.manual_seed[1338]]
+    apart[math.tensor[fitted.losses], math.flatten[expected['adamw_losses']]] lt 0.000000001
+
+--- with shakespeare_char's dropout, 0.2: five steps of AdamW in training,
+--- each pass's dropouts drawn after its batch, follow the reference's
+--- losses; ten ids generated still in training, each step's dropouts drawn
+--- before its multinomial, are the reference's; and so is the loss in eval
+--- after them
+test a_model_with_dropout_trains_and_draws_as_nanogpts_does[]
+    net = model.gpt[model.config[block_size = 16, vocab_size = 59, n_layer = 2, n_head = 2, n_embd = 32, dropout = 0.2, bias = false]]
+    opt = model.configure_optimizers[net, initial[net], 0.1, 0.01, 0.9, 0.95]
+    fitted = train.fit_batches[net, opt, ids[], 5, 4, rng.manual_seed[1339]]
+    apart[math.tensor[fitted.losses], math.flatten[expected['dropout_losses']]] lt 0.000000001
+    start = math.reshape[math.tensor[slice[ids[], 0, 8]], 1, 8]
+    made = model.generate[net, fitted.opt.theta, start, 10, rng.manual_seed[9]]
+    slice[ints_of[made.idx], 8, 18] eq ints_of[expected['dropout_generated']]
+    b = train.in_order[ids[], 0, 16]
+    abs[train.batch_loss[model.eval[net], fitted.opt.theta, b] - expected['dropout_after'][0][0]] lt 0.000000001

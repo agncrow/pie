@@ -267,7 +267,7 @@ fn multinomial[g, weights, n, replacement = false]
             out = push[out, lo]
         return Ints[out, drawn.generator]
     q = exponential[g, k, 1.0]
-    ratio = w ./ q.values
+    ratio = m.flatten[w ./ q.values]
     out = []
     taken = []
     for i in range[k]

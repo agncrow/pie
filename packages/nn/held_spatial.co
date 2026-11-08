@@ -315,8 +315,7 @@ test a_recurrent_layer_starts_from_zeros[]
 --- a channel dropout zeroes whole channels and scales the rest, and does
 --- nothing in evaluation
 test a_channel_dropout_drops_whole_channels[]
-    seed[2]
-    y = F.dropout2d[math.ones[4, 8, 3, 3], 0.5]
+    y = F.dropout2d[math.ones[4, 8, 3, 3], 0.5, true, rng.bernoulli[rng.manual_seed[2], 32, 0.5].values]
     counts = sum[math.reshape[y, 32, 9], 1]
     max[abs[counts .* (counts - 18.0)]] eq 0.0
     F.dropout1d[math.ones[2, 3, 4], 0.5, false] eq math.ones[2, 3, 4]

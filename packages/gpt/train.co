@@ -1,47 +1,90 @@
---- Training by plain gradient descent: one block of tokens a step, the
---- blocks taken in order from the text, each weight moved against its
---- gradient by the learning rate (docs/gpt-design.md: plain descent first,
---- held to the reference; AdamW next).
-use math, nn
+--- `use gpt.train`: training as nanoGPT's train.py trains: the loss of a
+--- batch of blocks, and an nn.optim optimizer stepped by its gradient —
+--- the blocks drawn at random from the text as get_batch draws them, or
+--- taken in order — each step's dropouts drawn after its batch, as
+--- train.py's forward pass draws them after get_batch.
+use math as m
+use nn.rng, nn.optim
 use model
 
---- what fitting answers: the loss before each step, and the weights after
-struct Fitted [losses, weights]
+--- a batch: the ids of each block `[B, T]`, for each the ids one after,
+--- and the noise the training pass over it reads (none drawn yet, or none
+--- drawn at all: model.dropout_noise)
+struct Batch [x, y, noise]
 
---- the weights after one step on a block: `ids` the block's tokens,
---- `targets` the token after each
-fn step[ids, targets, vocabulary_size, ws, lr]
-    grads = model.gradients[ids, targets, vocabulary_size, ws]
-    moved = for i in range[len[ws]]
-        ws[i] - grads[i] * lr
-    return moved
+--- what get_batch answers: the batch, and the generator past its draws
+struct Drawn [batch, generator]
 
---- the loss before each of `steps` steps over the blocks of `ids` in
---- order, and the weights after
-fn fit[ids, vocabulary_size, ws, steps, lr]
+--- what fitting answers: the loss of each step's batch before the step,
+--- the optimizer after the last, and the generator past every draw
+struct Fitted [losses, opt, generator]
+
+--- get_batch[ids, g, batch_size, block_size]: batch_size blocks of ids at
+--- offsets torch.randint draws below len(ids) − block_size, each block's
+--- targets the ids one after (nanoGPT's get_batch)
+fn get_batch[ids, g, batch_size, block_size]
+    d = rng.randint[g, 0, len[ids] - block_size, batch_size]
+    xs = []
+    ys = []
+    for i in d.values
+        xs = push[xs, slice[ids, i, i + block_size]]
+        ys = push[ys, slice[ids, i + 1, i + 1 + block_size]]
+    return Drawn[Batch[m.tensor[xs], m.tensor[ys], m.zeros[0]], d.generator]
+
+--- in_order[ids, i, block_size]: the i-th block of ids, alone in its batch
+fn in_order[ids, i, block_size]
+    at = i * block_size
+    return Batch[m.tensor[[slice[ids, at, at + block_size]]], m.tensor[[slice[ids, at + 1, at + block_size + 1]]], m.zeros[0]]
+
+--- batch_loss[net, theta, batch]: the model's loss on the batch, its
+--- dropouts reading the batch's noise (a record, so `grad` differentiates
+--- theta alone, and the loss and its gradient are one pass's)
+fn batch_loss[net, theta, batch]
+    return model.loss[net, theta, batch.x, batch.y, noise = batch.noise]
+
+--- fit[net, opt, ids, steps, g]: `steps` steps over the blocks of ids in
+--- order, each block's dropouts drawn from g
+fn fit[net, opt, ids, steps, g]
+    t = net.config.block_size
     losses = []
-    weights = ws
-    i = 0
-    while i lt steps
-        block = slice[ids, i * 16, i * 16 + 16]
-        after = slice[ids, i * 16 + 1, i * 16 + 17]
-        losses = push[losses, model.loss_of[block, after, vocabulary_size, weights]]
-        weights = step[block, after, vocabulary_size, weights, lr]
-        i = i + 1
-    return Fitted[losses, weights]
+    o = opt
+    at = g
+    for i in range[steps]
+        b = in_order[ids, i, t]
+        noisy = model.dropout_noise[net, at, 1, t]
+        b.noise = noisy.values
+        at = noisy.generator
+        losses = push[losses, batch_loss[net, o.theta, b]]
+        o = optim.step[o, grad[batch_loss][net, o.theta, b]]
+    return Fitted[losses, o, at]
 
---- a step lowers the loss on its own block, and two steps over a short
---- text answer a loss a step and the weights handed on
-test a_step_lowers_the_loss_and_fit_hands_the_weights_on[]
-    ws = model.init[59, 2]
-    ids = [5, 9, 2, 7, 1, 8, 3, 4, 6, 10, 11, 2, 5, 9, 2, 7]
-    after = [9, 2, 7, 1, 8, 3, 4, 6, 10, 11, 2, 5, 9, 2, 7, 1]
-    before = model.loss_of[ids, after, 59, ws]
-    moved = step[ids, after, 59, ws, 0.1]
-    len[moved] eq 27
-    model.loss_of[ids, after, 59, moved] lt before
-    longer = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
-    fitted = fit[longer, 59, model.init[59, 3], 2, 0.1]
+--- fit_batches[net, opt, ids, steps, batch_size, g]: `steps` steps, each on
+--- a batch get_batch draws from g, its dropouts drawn after it
+fn fit_batches[net, opt, ids, steps, batch_size, g]
+    t = net.config.block_size
+    losses = []
+    o = opt
+    at = g
+    for i in range[steps]
+        d = get_batch[ids, at, batch_size, t]
+        b = d.batch
+        noisy = model.dropout_noise[net, d.generator, batch_size, t]
+        b.noise = noisy.values
+        at = noisy.generator
+        losses = push[losses, batch_loss[net, o.theta, b]]
+        o = optim.step[o, grad[batch_loss][net, o.theta, b]]
+    return Fitted[losses, o, at]
+
+--- a step lowers the loss on its own block, and a batch is blocks of the
+--- text with their targets one after
+test a_step_lowers_the_loss_and_a_batch_is_the_texts_blocks[]
+    net = model.gpt[model.config[block_size = 8, vocab_size = 13, n_layer = 1, n_head = 2, n_embd = 8, bias = true]]
+    theta = model.parameters[net, rng.manual_seed[2]].values
+    ids = [5, 9, 2, 7, 1, 8, 3, 4, 6, 10, 11, 2, 5, 9, 2, 7, 1, 12]
+    b = in_order[ids, 0, 8]
+    fitted = fit[net, optim.sgd[theta, lr = 0.5], ids, 2, rng.manual_seed[4]]
     len[fitted.losses] eq 2
-    len[fitted.weights] eq 27
-    fitted.losses[0] gt 0.0
+    batch_loss[net, fitted.opt.theta, b] lt fitted.losses[0]
+    d = get_batch[ids, rng.manual_seed[3], 3, 8]
+    d.batch.x.shape eq [3, 8]
+    m.flatten[d.batch.x][1] eq m.flatten[d.batch.y][0]

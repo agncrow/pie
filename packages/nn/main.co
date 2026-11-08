@@ -1,7 +1,7 @@
 --- `use nn`: PyTorch's torch.nn. A layer is a record (`Layer`) made by a
 --- function named as PyTorch's class, in lowercase — `nn.linear[4, 8]` is
 --- nn.Linear(4, 8) — and a model is a layer of parts (`nn.sequential`,
---- `nn.module`). Every parameter of a model is one flat tensor, theta:
+--- `nn.module`, `nn.module_list`). Every parameter of a model is one flat tensor, theta:
 --- `nn.parameters[model, g]` draws PyTorch's default values from a torch
 --- generator (`nn.rng`) as PyTorch's modules draw them, laid as PyTorch's
 --- state_dict lays them (each layer's own first, then its parts'), and
@@ -11,8 +11,11 @@
 --- (the model and a batch, records, are constants of the run). A layer's
 --- buffers — a batch norm's running statistics — are its record's own
 --- (`held`); `nn.tracked` answers the model with them moved by a batch, as
---- PyTorch's forward pass moves them in training. The functions a model is
---- written in are `nn.functional`'s.
+--- PyTorch's forward pass moves them in training. A dropout in training
+--- reads its draws: `nn.dropout_noise[model, g, x]` draws every dropout of
+--- the step from a torch generator, in the order PyTorch's forward pass
+--- draws them, and the forward pass takes them as `noise`. The functions a
+--- model is written in are `nn.functional`'s.
 use math as m
 use functional, shapes, rng, windows
 
@@ -471,6 +474,123 @@ fn _cell_layer[form, ins, hidden, bias, word]
         own = own + 2 * gates * hidden
     return _leaf[form, own, [ins, hidden, 1, 0, 1], [0.0], word, [bias, false, false]]
 
+--- the attention layers --------------------------------------------------------
+
+--- multihead_attention[embed_dim, num_heads, dropout, bias, add_bias_kv,
+--- add_zero_attn, kdim, vdim, batch_first]: attention of num_heads heads
+--- (nn.MultiheadAttention), run by nn.attend: its parameters PyTorch's —
+--- in_proj_weight `[3E, E]` (q_, k_ and v_proj_weight where the keys or
+--- the values have other sizes, kdim and vdim; 0 is E), in_proj_bias,
+--- bias_k and bias_v, then out_proj, a linear layer — drawn as PyTorch
+--- draws them: out_proj as a linear layer is made, then the projections
+--- xavier_uniform, the biases 0 and bias_k and bias_v xavier_normal
+fn multihead_attention[embed_dim, num_heads, dropout = 0.0, bias = true, add_bias_kv = false, add_zero_attn = false, kdim = 0, vdim = 0, batch_first = false]
+    e = embed_dim
+    if e lt 1 or num_heads lt 1
+        halt['embed_dim and num_heads must be greater than 0, got embed_dim=`e` and num_heads=`num_heads` instead']
+    if (e / num_heads) * num_heads ne e
+        halt['embed_dim must be divisible by num_heads']
+    kd = kdim
+    if kd eq 0
+        kd = e
+    vd = vdim
+    if vd eq 0
+        vd = e
+    own = 3 * e * e
+    if kd ne e or vd ne e
+        own = e * e + e * kd + e * vd
+    if bias
+        own = own + 3 * e
+    if add_bias_kv
+        own = own + 2 * e
+    out_proj = _named_part[linear[e, e, bias = bias], 'out_proj']
+    return _placed[Layer['multihead_attention', '', 0, own, own + out_proj.size, _sizes[[e, num_heads, kd, vd]], _reals[[dropout]], '', [bias, add_bias_kv, add_zero_attn, batch_first], true, m.zeros[0], [out_proj]], 0]
+
+--- transformer_encoder_layer[d_model, nhead, dim_feedforward, dropout,
+--- activation, layer_norm_eps, batch_first, norm_first, bias]: a
+--- self-attention block and a feed-forward block, each added to what it
+--- runs on and normalized — before the block where norm_first
+--- (nn.TransformerEncoderLayer, run by nn.encode); its parts self_attn,
+--- linear1, linear2, norm1 and norm2, PyTorch's. The activation is relu or
+--- gelu
+fn transformer_encoder_layer[d_model, nhead, dim_feedforward = 2048, dropout = 0.1, activation = 'relu', layer_norm_eps = 0.00001, batch_first = false, norm_first = false, bias = true]
+    _activation_known[activation]
+    parts = [_named_part[multihead_attention[d_model, nhead, dropout = dropout, bias = bias, batch_first = batch_first], 'self_attn'], _named_part[linear[d_model, dim_feedforward, bias = bias], 'linear1'], _named_part[linear[dim_feedforward, d_model, bias = bias], 'linear2'], _named_part[layer_norm[[d_model], eps = layer_norm_eps, bias = bias], 'norm1'], _named_part[layer_norm[[d_model], eps = layer_norm_eps, bias = bias], 'norm2']]
+    return _transformer_layer['transformer_encoder_layer', parts, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps, batch_first, norm_first, bias]
+
+--- transformer_decoder_layer[…]: a self-attention block, an attention
+--- block over the memory and a feed-forward block
+--- (nn.TransformerDecoderLayer, run by nn.decode); its parts self_attn,
+--- multihead_attn, linear1, linear2, norm1, norm2 and norm3
+fn transformer_decoder_layer[d_model, nhead, dim_feedforward = 2048, dropout = 0.1, activation = 'relu', layer_norm_eps = 0.00001, batch_first = false, norm_first = false, bias = true]
+    _activation_known[activation]
+    parts = [_named_part[multihead_attention[d_model, nhead, dropout = dropout, bias = bias, batch_first = batch_first], 'self_attn'], _named_part[multihead_attention[d_model, nhead, dropout = dropout, bias = bias, batch_first = batch_first], 'multihead_attn'], _named_part[linear[d_model, dim_feedforward, bias = bias], 'linear1'], _named_part[linear[dim_feedforward, d_model, bias = bias], 'linear2'], _named_part[layer_norm[[d_model], eps = layer_norm_eps, bias = bias], 'norm1'], _named_part[layer_norm[[d_model], eps = layer_norm_eps, bias = bias], 'norm2'], _named_part[layer_norm[[d_model], eps = layer_norm_eps, bias = bias], 'norm3']]
+    return _transformer_layer['transformer_decoder_layer', parts, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps, batch_first, norm_first, bias]
+
+fn _activation_known[activation]
+    if activation ne 'relu' and activation ne 'gelu'
+        halt['activation should be relu/gelu, not `activation`']
+
+fn _transformer_layer[form, parts, d_model, nhead, dim_feedforward, dropout, activation, eps, batch_first, norm_first, bias]
+    out = _container[form, parts]
+    out.ints = _sizes[[d_model, nhead, dim_feedforward]]
+    out.floats = _reals[[dropout, eps]]
+    out.word = activation
+    out.flags = [batch_first, norm_first, bias]
+    return out
+
+--- transformer_encoder[encoder_layer, num_layers, norm]: num_layers
+--- copies of the layer, one after another, each starting from the
+--- layer's parameters (nn.TransformerEncoder's clones); with norm, a layer
+--- norm of the layer's width, eps and bias after them, as nn.Transformer
+--- makes its own. Its parts are layers (0, 1, …) and norm. Run by
+--- nn.encode, which reads a mask that is the causal triangle as
+--- PyTorch's does when no hint is given (is_causal)
+fn transformer_encoder[encoder_layer, num_layers, norm = false]
+    if encoder_layer.form ne 'transformer_encoder_layer'
+        halt['nn.transformer_encoder takes a transformer_encoder_layer, and was given `encoder_layer.form`']
+    return _layer_stack['transformer_encoder', encoder_layer, num_layers, norm]
+
+--- transformer_decoder[decoder_layer, num_layers, norm]: alike, of
+--- decoder layers (nn.TransformerDecoder), run by nn.decode
+fn transformer_decoder[decoder_layer, num_layers, norm = false]
+    if decoder_layer.form ne 'transformer_decoder_layer'
+        halt['nn.transformer_decoder takes a transformer_decoder_layer, and was given `decoder_layer.form`']
+    return _layer_stack['transformer_decoder', decoder_layer, num_layers, norm]
+
+fn _layer_stack[form, one, num_layers, norm]
+    if num_layers lt 1
+        halt['`form`: num_layers must be greater than zero']
+    copies = []
+    for i in range[num_layers]
+        copies = push[copies, _named_part[one, str[i]]]
+    parts = [_named_part[_container['list', copies], 'layers']]
+    if norm
+        parts = push[parts, _named_part[layer_norm[[one.ints[0]], eps = one.floats[1], bias = one.flags[2]], 'norm']]
+    out = _container[form, parts]
+    out.ints = _sizes[[num_layers]]
+    return out
+
+--- transformer[d_model, nhead, num_encoder_layers, num_decoder_layers,
+--- dim_feedforward, dropout, activation, layer_norm_eps, batch_first,
+--- norm_first, bias]: an encoder of num_encoder_layers layers and a
+--- decoder of num_decoder_layers, each with its norm (nn.Transformer, run
+--- by nn.transform); its parameters drawn as PyTorch's are, then every one
+--- of two axes or more xavier_uniform, in order, as nn.Transformer does
+fn transformer[d_model = 512, nhead = 8, num_encoder_layers = 6, num_decoder_layers = 6, dim_feedforward = 2048, dropout = 0.1, activation = 'relu', layer_norm_eps = 0.00001, batch_first = false, norm_first = false, bias = true]
+    enc = transformer_encoder[transformer_encoder_layer[d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps, batch_first, norm_first, bias], num_encoder_layers, norm = true]
+    dec = transformer_decoder[transformer_decoder_layer[d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps, batch_first, norm_first, bias], num_decoder_layers, norm = true]
+    out = _container['transformer', [_named_part[enc, 'encoder'], _named_part[dec, 'decoder']]]
+    out.ints = _sizes[[d_model, nhead]]
+    out.flags = [batch_first]
+    return out
+
+--- a layer under a name of its own in its parent
+fn _named_part[layer, name]
+    out = layer
+    out.name = name
+    return out
+
 --- the activations, each nn.functional's function as a layer
 fn relu[]
     return _plain['relu', [0], [0.0], '']
@@ -592,6 +712,17 @@ fn module[parts]
         ordered = push[ordered, q]
     return _container['module', ordered]
 
+--- module_list[parts]: parts by position, named 0, 1, … (nn.ModuleList),
+--- for a forward function the program writes, which runs them in turn
+--- (`for block in model.parts`, or nn.part[model, '0'])
+fn module_list[parts]
+    ordered = []
+    for i in range[len[parts]]
+        q = parts[i]
+        q.name = str[i]
+        ordered = push[ordered, q]
+    return _container['list', ordered]
+
 --- part[model, name]: the part of that name
 fn part[model, name]
     for p in model.parts
@@ -609,26 +740,39 @@ fn size[model]
 fn _numbers[theta, at, n]
     return slice[theta, at, at + n]
 
---- forward[layer, theta, x]: the layer run on x, its parameters read from
---- theta. Between layers the numbers go flat, their sizes beside them
---- (`_run`, `_after`): a model's layers change the rank of what they hand
---- on — a flatten, an embedding — and one copy of a function holds one
---- rank, so each layer lays the numbers in the rank it computes at, as
---- PyTorch's kernels view a tensor's storage
-fn forward[layer, theta, x]
+--- forward[layer, theta, x, noise]: the layer run on x, its parameters
+--- read from theta. Between layers the numbers go flat, their sizes beside
+--- them (`_run`, `_after`): a model's layers change the rank of what they
+--- hand on — a flatten, an embedding — and one copy of a function holds
+--- one rank, so each layer lays the numbers in the rank it computes at, as
+--- PyTorch's kernels view a tensor's storage. In training, the dropouts
+--- read the step's noise (nn.dropout_noise)
+fn forward[layer, theta, x, noise = -1.0]
     dims = x.shape
-    return shapes.laid[_run[layer, theta, m.flatten[x], dims], _after[layer, dims]]
+    return shapes.laid[_run[layer, theta, m.flatten[x], dims, _noise_for[layer, dims, [0], noise]], _after[layer, dims]]
 
---- a layer run on the flat numbers `v` of a tensor of sizes `dims`: its
---- answer's numbers, flat (their sizes are `_after`'s)
-fn _run[layer, theta, v, dims]
+--- the noise a layer's forward pass reads, flat: as many numbers as its
+--- dropouts draw (`_sites`), none where they draw none
+fn _noise_for[layer, dims, other, noise]
+    need = _sum_sites[_sites[layer, dims, other]]
+    if need eq 0
+        return m.zeros[0]
+    return functional.noise_of[noise, need, 'a `layer.form` in training']
+
+--- a layer run on the flat numbers `v` of a tensor of sizes `dims`, reading
+--- its dropouts' draws from `noise` (exactly as many as `_sites` counts):
+--- its answer's numbers, flat (their sizes are `_after`'s)
+fn _run[layer, theta, v, dims, noise]
     f = layer.form
     at = layer.at
     if f eq 'sequential'
         h = v
         d = dims
+        k = 0
         for p in layer.parts
-            h = _run[p, theta, h, d]
+            c = _sum_sites[_sites[p, d, [0]]]
+            h = _run[p, theta, h, d, slice[noise, k, k + c]]
+            k = k + c
             d = _after[p, d]
         return h
     if f eq 'module'
@@ -690,7 +834,7 @@ fn _run[layer, theta, v, dims]
             return functional.prelu[v, w]
         return m.flatten[functional.prelu[_channeled[v, dims], w]]
     if f eq 'dropout'
-        return functional.dropout[v, layer.floats[0], layer.training]
+        return functional.dropout[v, layer.floats[0], layer.training, noise]
     if f eq 'identity' or f eq 'flatten' or f eq 'unflatten'
         return v
     if f eq 'conv' or f eq 'conv_transpose'
@@ -710,12 +854,24 @@ fn _run[layer, theta, v, dims]
     if f eq 'dropout_channels'
         x = shapes.laid[v, dims]
         if layer.ints[0] eq 1
-            return m.flatten[functional.dropout1d[x, layer.floats[0], layer.training]]
+            return m.flatten[functional.dropout1d[x, layer.floats[0], layer.training, noise]]
         if layer.ints[0] eq 2
-            return m.flatten[functional.dropout2d[x, layer.floats[0], layer.training]]
-        return m.flatten[functional.dropout3d[x, layer.floats[0], layer.training]]
+            return m.flatten[functional.dropout2d[x, layer.floats[0], layer.training, noise]]
+        return m.flatten[functional.dropout3d[x, layer.floats[0], layer.training, noise]]
     if f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
-        return _recurrence[layer, theta, v, dims, 0.0, 0.0].output
+        return _recurrence[layer, theta, v, dims, 0.0, 0.0, noise].output
+    if f eq 'multihead_attention'
+        q = _seq[dims, layer.flags[3]]
+        return _self_attention[layer, theta, v, q, len[dims] eq 3 and layer.flags[3], noise]
+    if f eq 'transformer_encoder_layer' or f eq 'transformer_encoder'
+        q = _seq[dims, _first_layer[layer].flags[0]]
+        return _encoder_run[layer, theta, v, q.l, q.n, _no_masks[], false, noise]
+    if f eq 'transformer_decoder_layer' or f eq 'transformer_decoder'
+        halt['a `f` runs on a target and a memory: nn.decode']
+    if f eq 'transformer'
+        halt['a transformer runs on a source and a target: nn.transform']
+    if f eq 'list'
+        halt['a list of layers runs inside the layer that holds it']
     if f eq 'glu' or f eq 'softmax' or f eq 'log_softmax' or f eq 'softmin'
         x = _around[v, dims, layer.ints[0]]
         if f eq 'glu'
@@ -915,7 +1071,7 @@ fn _joined[pieces]
 --- step's gates the hidden state's projection plus the input's; a layer
 --- both ways runs a second time from the last step back, its outputs beside
 --- the first's; dropout between layers in training
-fn _recurrence[layer, theta, v, dims, h0, c0]
+fn _recurrence[layer, theta, v, dims, h0, c0, noise]
     f = layer.form
     ins = layer.ints[0]
     hidden = layer.ints[1]
@@ -1016,7 +1172,8 @@ fn _recurrence[layer, theta, v, dims, h0, c0]
         if dirs eq 2
             seq = concat[made[0], made[1], axis = 1]
         if layer.training and layer.floats[0] gt 0.0 and l lt layers - 1
-            seq = functional.dropout[seq, layer.floats[0], true]
+            drawn = steps * n * dirs * hout
+            seq = functional.dropout[seq, layer.floats[0], true, slice[noise, l * drawn, (l + 1) * drawn]]
     out = m.flatten[seq]
     if batched and layer.flags[1] and not cell
         out = m.flatten[out[windows.swapped[steps, n, dirs * hout]]]
@@ -1032,8 +1189,9 @@ fn _recurrence[layer, theta, v, dims, h0, c0]
 --- (`Recurrent`): `output, (h_n, c_n) = lstm(x, (h0, c0))`; h0 and h_n
 --- `[layers·directions, batch, hidden]` (no batch axis for an input of none);
 --- a cell's output and h_n its new hidden state `[batch, hidden]`, its c the
---- new cell state. c holds no numbers for an RNN or a GRU
-fn recurrent[layer, theta, x, h0 = 0.0, c0 = 0.0]
+--- new cell state. c holds no numbers for an RNN or a GRU. In training,
+--- the dropout between layers reads the step's noise (nn.dropout_noise)
+fn recurrent[layer, theta, x, h0 = 0.0, c0 = 0.0, noise = -1.0]
     f = layer.form
     if not (f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell')
         halt['nn.recurrent runs a recurrent layer (rnn, lstm, gru and their cells), and was given `f`']
@@ -1049,7 +1207,7 @@ fn recurrent[layer, theta, x, h0 = 0.0, c0 = 0.0]
     held = (m.zeros[1] + c0).shape
     if not (held eq [1] or held eq cdims)
         halt['`f`: Expected hidden size `str[cdims]`, got `str[held]`']
-    r = _recurrence[layer, theta, m.flatten[x], dims, h0, c0]
+    r = _recurrence[layer, theta, m.flatten[x], dims, h0, c0, _noise_for[layer, dims, [0], noise]]
     if f eq 'lstm' or f eq 'lstm_cell'
         return Recurrent[shapes.laid[r.output, _after[layer, dims]], shapes.laid[r.h, hdims], shapes.laid[r.c, cdims]]
     return Recurrent[shapes.laid[r.output, _after[layer, dims]], shapes.laid[r.h, hdims], r.c]
@@ -1139,6 +1297,512 @@ fn forward2[layer, theta, x1, x2]
         return functional.bilinear[x1, x2, w, _numbers[theta, at + n, outs]]
     return functional.bilinear[x1, x2, w]
 
+--- attention and the transformer ---------------------------------------------
+
+--- a sequence's positions and items, from its sizes: `[L, N, E]`, `[N, L,
+--- E]` batch-first, `[L, E]` one item
+struct Seq [l, n]
+
+fn _seq[dims, batch_first]
+    if len[dims] eq 2
+        return Seq[dims[0], 1]
+    if len[dims] ne 3
+        halt['a sequence takes [L, N, E] ([N, L, E] batch-first) or [L, E], and this has `len[dims]` axes']
+    if batch_first
+        return Seq[dims[1], dims[0]]
+    return Seq[dims[0], dims[1]]
+
+--- an encoder's or a decoder's first layer, or the layer itself
+fn _first_layer[layer]
+    if layer.form eq 'transformer_encoder' or layer.form eq 'transformer_decoder'
+        return layer.parts[0].parts[0]
+    return layer
+
+fn _no_masks[]
+    return functional.Masks[m.zeros[0], 1, 0, m.zeros[0]]
+
+--- whether a layer's dropouts draw: in training, with p above 0 and below 1
+fn _drawing[layer]
+    p = layer.floats[0]
+    return layer.training and p gt 0.0 and p lt 1.0
+
+--- the draws an attention layer's dropout makes for l queries of s keys
+--- and n items: one a weight of each head, `[N·heads, L, S]` (S with
+--- bias_k's and the zero attention's positions)
+fn _attention_count[layer, l, s, n]
+    if not _drawing[layer]
+        return 0
+    width = s
+    if layer.flags[1]
+        width = width + 1
+    if layer.flags[2]
+        width = width + 1
+    return n * layer.ints[1] * l * width
+
+--- an attention layer's parameters, flat, read from theta
+fn _projections[layer, theta]
+    e = layer.ints[0]
+    kd = layer.ints[2]
+    vd = layer.ints[3]
+    at = layer.at
+    none = m.zeros[0]
+    in_w = none
+    q_w = none
+    k_w = none
+    v_w = none
+    if kd eq e and vd eq e
+        in_w = _numbers[theta, at, 3 * e * e]
+        at = at + 3 * e * e
+    else
+        q_w = _numbers[theta, at, e * e]
+        k_w = _numbers[theta, at + e * e, e * kd]
+        v_w = _numbers[theta, at + e * e + e * kd, e * vd]
+        at = at + e * e + e * kd + e * vd
+    in_b = none
+    out_b = none
+    out = layer.parts[0]
+    if layer.flags[0]
+        in_b = _numbers[theta, at, 3 * e]
+        at = at + 3 * e
+        out_b = _numbers[theta, out.at + e * e, e]
+    bias_k = none
+    bias_v = none
+    if layer.flags[1]
+        bias_k = _numbers[theta, at, e]
+        bias_v = _numbers[theta, at + e, e]
+    return functional.Projections[in_w, in_b, q_w, k_w, v_w, bias_k, bias_v, _numbers[theta, out.at, e * e], out_b]
+
+--- an attention layer over time-major flat queries q `[l, n, E]`, keys k
+--- and values v of s positions: its output, time-major and flat, and its
+--- weights (`functional.Attention`); `keep` is its dropout's noise
+fn _attention_flat[layer, theta, q, k, v, l, s, n, masks, need_weights, average, is_causal, keep]
+    p = layer.floats[0]
+    if not layer.training
+        p = 0.0
+    return functional.multi_head_flat[q, k, v, l, s, n, layer.ints[0], layer.ints[2], layer.ints[3], layer.ints[1], _projections[layer, theta], layer.flags[2], p, masks, need_weights, average, is_causal, keep]
+
+--- an attention layer run on flat x as its own queries, keys and values,
+--- in x's layout (`bf`: batch-first, `[N, L, E]`)
+fn _self_attention[layer, theta, v, q, bf, noise]
+    e = layer.ints[0]
+    x = v
+    if bf
+        x = v[windows.swapped[q.n, q.l, e]]
+    o = _attention_flat[layer, theta, x, x, x, q.l, q.l, q.n, _no_masks[], false, true, false, noise].output
+    if bf
+        return o[windows.swapped[q.l, q.n, e]]
+    return o
+
+--- attend[layer, theta, query, key, value, key_padding_mask, need_weights,
+--- attn_mask, average_attn_weights, is_causal, noise]: a multi-head
+--- attention layer run (nn.MultiheadAttention's forward): query `[L, N,
+--- E]` (`[N, L, E]` batch-first, `[L, E]` one item), key `[S, N, kdim]`
+--- and value `[S, N, vdim]` alike, the masks float masks
+--- (functional.multi_head_attention_forward's). It answers the output, laid
+--- as the query, and where need_weights the weights: `[N, L, S]` averaged
+--- over the heads, or `[N, heads, L, S]` (`functional.Attention`). In
+--- training, its dropout reads the noise nn.dropout_noise draws
+fn attend[layer, theta, query, key, value, key_padding_mask = 0.0, need_weights = true, attn_mask = 0.0, average_attn_weights = true, is_causal = false, noise = -1.0]
+    if layer.form ne 'multihead_attention'
+        halt['nn.attend runs a multi-head attention layer, and was given `layer.form`']
+    e = layer.ints[0]
+    h = layer.ints[1]
+    qd = query.shape
+    kd = key.shape
+    vd = value.shape
+    batched = len[qd] eq 3
+    if batched
+        if len[kd] ne 3 or len[vd] ne 3
+            halt['For batched (3-D) ‘query’, expected ‘key’ and ‘value’ to be 3-D but found `len[kd]`-D and `len[vd]`-D tensors respectively']
+    else
+        if len[qd] ne 2
+            halt['query should be unbatched 2D or batched 3D tensor but received `len[qd]`-D query tensor']
+        if len[kd] ne 2 or len[vd] ne 2
+            halt['For unbatched (2-D) ‘query’, expected ‘key’ and ‘value’ to be 2-D but found `len[kd]`-D and `len[vd]`-D tensors respectively']
+    if qd[len[qd] - 1] ne e
+        halt['was expecting embedding dimension of `e`, but got `qd[len[qd] - 1]`']
+    if kd[len[kd] - 1] ne layer.ints[2] or vd[len[vd] - 1] ne layer.ints[3]
+        halt['the keys take `layer.ints[2]` features and the values `layer.ints[3]`, and have `kd[len[kd] - 1]` and `vd[len[vd] - 1]`']
+    if not (slice[kd, 0, len[kd] - 1] eq slice[vd, 0, len[vd] - 1])
+        halt['key shape `str[kd]` does not match value shape `str[vd]`']
+    bf = layer.flags[3] and batched
+    q = _seq[qd, bf]
+    k = _seq[kd, bf]
+    if k.n ne q.n
+        halt['the query holds `q.n` items and the key `k.n`']
+    masks = functional.masks_of[attn_mask, key_padding_mask, q.l, k.l, q.n, h, is_causal]
+    qv = m.flatten[query]
+    kv = m.flatten[key]
+    vv = m.flatten[value]
+    if bf
+        qv = qv[windows.swapped[q.n, q.l, e]]
+        kv = kv[windows.swapped[k.n, k.l, layer.ints[2]]]
+        vv = vv[windows.swapped[k.n, k.l, layer.ints[3]]]
+    keep = m.zeros[0]
+    count = _attention_count[layer, q.l, k.l, q.n]
+    if count gt 0
+        keep = functional.noise_of[noise, count, 'a multihead_attention in training']
+    weighed = _attention_flat[layer, theta, qv, kv, vv, q.l, k.l, q.n, masks, need_weights, average_attn_weights, is_causal, keep]
+    out = weighed.output
+    if bf
+        out = out[windows.swapped[q.l, q.n, e]]
+    output = shapes.laid[out, qd]
+    if not need_weights
+        return functional.Attention[output, m.zeros[0]]
+    width = k.l
+    if layer.flags[1]
+        width = width + 1
+    if layer.flags[2]
+        width = width + 1
+    wd = [q.n, h, q.l, width]
+    if average_attn_weights
+        wd = [q.n, q.l, width]
+    if not batched
+        wd = slice[wd, 1, len[wd]]
+    return functional.Attention[output, shapes.laid[weighed.weights, wd]]
+
+--- encode[layer, theta, src, src_mask, src_key_padding_mask, is_causal,
+--- noise]: a transformer encoder layer or encoder run on src `[S, N, E]`
+--- (`[N, S, E]` batch-first, `[S, E]` one item), the masks float masks
+--- (nn.TransformerEncoderLayer's and nn.TransformerEncoder's forward). An
+--- encoder reads a src_mask that is the causal triangle as causal, as
+--- PyTorch's does when no hint is given: the triangle then attends, and the
+--- mask itself has no gradient. In training, the dropouts read the noise
+--- nn.dropout_noise draws
+fn encode[layer, theta, src, src_mask = 0.0, src_key_padding_mask = 0.0, is_causal = false, noise = -1.0]
+    f = layer.form
+    if f ne 'transformer_encoder_layer' and f ne 'transformer_encoder'
+        halt['nn.encode runs a transformer encoder layer or encoder, and was given `f`']
+    one = _first_layer[layer]
+    sd = src.shape
+    _features_are[sd, one.ints[0]]
+    q = _seq[sd, one.flags[0]]
+    masks = functional.masks_of[src_mask, src_key_padding_mask, q.l, q.l, q.n, one.ints[1], is_causal]
+    drawn = _noise_for[layer, sd, [0], noise]
+    return shapes.laid[_encoder_run[layer, theta, m.flatten[src], q.l, q.n, masks, is_causal, drawn], sd]
+
+--- decode[layer, theta, tgt, memory, tgt_mask, memory_mask,
+--- tgt_key_padding_mask, memory_key_padding_mask, tgt_is_causal,
+--- memory_is_causal, noise]: a transformer decoder layer or decoder run on
+--- tgt `[T, N, E]`, attending to memory `[S, N, E]` (batch-first and one
+--- item as encode's) — nn.TransformerDecoderLayer's and
+--- nn.TransformerDecoder's forward; a decoder reads a tgt_mask that is the
+--- causal triangle as causal, as encode does
+fn decode[layer, theta, tgt, memory, tgt_mask = 0.0, memory_mask = 0.0, tgt_key_padding_mask = 0.0, memory_key_padding_mask = 0.0, tgt_is_causal = false, memory_is_causal = false, noise = -1.0]
+    f = layer.form
+    if f ne 'transformer_decoder_layer' and f ne 'transformer_decoder'
+        halt['nn.decode runs a transformer decoder layer or decoder, and was given `f`']
+    one = _first_layer[layer]
+    td = tgt.shape
+    md = memory.shape
+    _features_are[td, one.ints[0]]
+    _features_are[md, one.ints[0]]
+    if len[td] ne len[md]
+        halt['the target has `len[td]` axes and the memory `len[md]`']
+    t = _seq[td, one.flags[0]]
+    s = _seq[md, one.flags[0]]
+    if t.n ne s.n
+        halt['the batch number of tgt and memory must be equal']
+    h = one.ints[1]
+    tmasks = functional.masks_of[tgt_mask, tgt_key_padding_mask, t.l, t.l, t.n, h, tgt_is_causal]
+    mmasks = functional.masks_of[memory_mask, memory_key_padding_mask, t.l, s.l, t.n, h, memory_is_causal]
+    drawn = _noise_for[layer, td, md, noise]
+    return shapes.laid[_decoder_run[layer, theta, m.flatten[tgt], t.l, m.flatten[memory], s.l, t.n, tmasks, mmasks, tgt_is_causal, memory_is_causal, drawn], td]
+
+--- transform[model, theta, src, tgt, src_mask, tgt_mask, memory_mask,
+--- src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask,
+--- src_is_causal, tgt_is_causal, memory_is_causal, noise]: a transformer
+--- run (nn.Transformer's forward): src encoded, then tgt decoded attending
+--- to it; the masks read as encode's and decode's read them
+fn transform[model, theta, src, tgt, src_mask = 0.0, tgt_mask = 0.0, memory_mask = 0.0, src_key_padding_mask = 0.0, tgt_key_padding_mask = 0.0, memory_key_padding_mask = 0.0, src_is_causal = false, tgt_is_causal = false, memory_is_causal = false, noise = -1.0]
+    if model.form ne 'transformer'
+        halt['nn.transform runs a transformer, and was given `model.form`']
+    d = model.ints[0]
+    h = model.ints[1]
+    bf = model.flags[0]
+    sd = src.shape
+    td = tgt.shape
+    if len[sd] ne len[td]
+        halt['the source has `len[sd]` axes and the target `len[td]`']
+    s = _seq[sd, bf]
+    t = _seq[td, bf]
+    if s.n ne t.n
+        halt['the batch number of src and tgt must be equal']
+    if sd[len[sd] - 1] ne d or td[len[td] - 1] ne d
+        halt['the feature number of src and tgt must be equal to d_model']
+    smasks = functional.masks_of[src_mask, src_key_padding_mask, s.l, s.l, s.n, h, src_is_causal]
+    tmasks = functional.masks_of[tgt_mask, tgt_key_padding_mask, t.l, t.l, t.n, h, tgt_is_causal]
+    mmasks = functional.masks_of[memory_mask, memory_key_padding_mask, t.l, s.l, t.n, h, memory_is_causal]
+    drawn = _noise_for[model, sd, td, noise]
+    ec = _sum_sites[_sites[model.parts[0], sd, [0]]]
+    memory = _encoder_run[model.parts[0], theta, m.flatten[src], s.l, s.n, smasks, src_is_causal, slice[drawn, 0, ec]]
+    out = _decoder_run[model.parts[1], theta, m.flatten[tgt], t.l, memory, s.l, t.n, tmasks, mmasks, tgt_is_causal, memory_is_causal, slice[drawn, ec, len[drawn]]]
+    return shapes.laid[out, td]
+
+fn _features_are[dims, d]
+    if len[dims] ne 2 and len[dims] ne 3
+        halt['a transformer takes [L, N, E] ([N, L, E] batch-first) or [L, E], and this has `len[dims]` axes']
+    if dims[len[dims] - 1] ne d
+        halt['was expecting embedding dimension of `d`, but got `dims[len[dims] - 1]`']
+
+--- whether a mask is the causal triangle of l positions (PyTorch's
+--- _detect_is_causal_mask): `[L, L]`, 0 on and below the diagonal and −∞
+--- above it
+fn _causal_given[masks, l]
+    if masks.axes ne 2 or len[masks.attention] ne l * l
+        return false
+    t = m.flatten[functional.causal_mask[l, l]]
+    for i in range[l * l]
+        if masks.attention[i] ne t[i]
+            return false
+    return true
+
+--- an encoder layer, or an encoder's layers and its norm, run on flat x of
+--- l positions and n items in the layer's layout, reading the noise of
+--- each layer in turn
+fn _encoder_run[layer, theta, x, l, n, masks, is_causal, noise]
+    if layer.form eq 'transformer_encoder_layer'
+        return _encoder_layer_run[layer, theta, x, l, n, masks, is_causal, noise]
+    causal = is_causal or _causal_given[masks, l]
+    h = x
+    k = 0
+    for one in layer.parts[0].parts
+        c = _sum_sites[_encoder_layer_sites[one, l, n]]
+        h = _encoder_layer_run[one, theta, h, l, n, masks, causal, slice[noise, k, k + c]]
+        k = k + c
+    if len[layer.parts] gt 1
+        return _run[layer.parts[1], theta, h, [l * n, _first_layer[layer].ints[0]], m.zeros[0]]
+    return h
+
+--- an encoder layer: PyTorch's x = norm1(x + sa(x)), x = norm2(x + ff(x)),
+--- or with norm_first x = x + sa(norm1(x)), x = x + ff(norm2(x)); the
+--- noise is the attention's, then dropout1's, the feed-forward's and
+--- dropout2's
+fn _encoder_layer_run[layer, theta, x, l, n, masks, is_causal, noise]
+    d = layer.ints[0]
+    rows = l * n
+    att = part[layer, 'self_attn']
+    a = _attention_count[att, l, l, n]
+    b = 0
+    c = 0
+    if _drawing[layer]
+        b = rows * d
+        c = rows * layer.ints[2]
+    na = slice[noise, 0, a]
+    n1 = slice[noise, a, a + b]
+    nf = slice[noise, a + b, a + b + c]
+    n2 = slice[noise, a + b + c, a + 2 * b + c]
+    if layer.flags[1]
+        y = _run[part[layer, 'norm1'], theta, x, [rows, d], m.zeros[0]]
+        h = x + _attention_block[layer, att, theta, y, y, l, l, n, masks, is_causal, na, n1]
+        z = _run[part[layer, 'norm2'], theta, h, [rows, d], m.zeros[0]]
+        return h + _feed_forward[layer, theta, z, rows, nf, n2]
+    g = _run[part[layer, 'norm1'], theta, x + _attention_block[layer, att, theta, x, x, l, l, n, masks, is_causal, na, n1], [rows, d], m.zeros[0]]
+    return _run[part[layer, 'norm2'], theta, g + _feed_forward[layer, theta, g, rows, nf, n2], [rows, d], m.zeros[0]]
+
+--- a decoder layer, or a decoder's layers and its norm, run on flat x of t
+--- positions attending to the memory's s, n items in the layer's layout
+fn _decoder_run[layer, theta, x, t, memory, s, n, tmasks, mmasks, t_causal, m_causal, noise]
+    if layer.form eq 'transformer_decoder_layer'
+        return _decoder_layer_run[layer, theta, x, t, memory, s, n, tmasks, mmasks, t_causal, m_causal, noise]
+    causal = t_causal or _causal_given[tmasks, t]
+    h = x
+    k = 0
+    for one in layer.parts[0].parts
+        c = _sum_sites[_decoder_layer_sites[one, t, s, n]]
+        h = _decoder_layer_run[one, theta, h, t, memory, s, n, tmasks, mmasks, causal, m_causal, slice[noise, k, k + c]]
+        k = k + c
+    if len[layer.parts] gt 1
+        return _run[layer.parts[1], theta, h, [t * n, _first_layer[layer].ints[0]], m.zeros[0]]
+    return h
+
+--- a decoder layer: PyTorch's x = norm1(x + sa(x)), x = norm2(x + mha(x,
+--- memory)), x = norm3(x + ff(x)), or each norm before its block with
+--- norm_first; the noise is the self-attention's, dropout1's, the
+--- attention over the memory's, dropout2's, the feed-forward's and
+--- dropout3's
+fn _decoder_layer_run[layer, theta, x, t, memory, s, n, tmasks, mmasks, t_causal, m_causal, noise]
+    d = layer.ints[0]
+    rows = t * n
+    sa = part[layer, 'self_attn']
+    ca = part[layer, 'multihead_attn']
+    a1 = _attention_count[sa, t, t, n]
+    a2 = _attention_count[ca, t, s, n]
+    b = 0
+    c = 0
+    if _drawing[layer]
+        b = rows * d
+        c = rows * layer.ints[2]
+    k1 = a1
+    k2 = k1 + b
+    k3 = k2 + a2
+    k4 = k3 + b
+    k5 = k4 + c
+    k6 = k5 + b
+    if layer.flags[1]
+        y = _run[part[layer, 'norm1'], theta, x, [rows, d], m.zeros[0]]
+        h = x + _attention_block[layer, sa, theta, y, y, t, t, n, tmasks, t_causal, slice[noise, 0, k1], slice[noise, k1, k2]]
+        z = _run[part[layer, 'norm2'], theta, h, [rows, d], m.zeros[0]]
+        h2 = h + _attention_block[layer, ca, theta, z, memory, t, s, n, mmasks, m_causal, slice[noise, k2, k3], slice[noise, k3, k4]]
+        w = _run[part[layer, 'norm3'], theta, h2, [rows, d], m.zeros[0]]
+        return h2 + _feed_forward[layer, theta, w, rows, slice[noise, k4, k5], slice[noise, k5, k6]]
+    g = _run[part[layer, 'norm1'], theta, x + _attention_block[layer, sa, theta, x, x, t, t, n, tmasks, t_causal, slice[noise, 0, k1], slice[noise, k1, k2]], [rows, d], m.zeros[0]]
+    g2 = _run[part[layer, 'norm2'], theta, g + _attention_block[layer, ca, theta, g, memory, t, s, n, mmasks, m_causal, slice[noise, k2, k3], slice[noise, k3, k4]], [rows, d], m.zeros[0]]
+    return _run[part[layer, 'norm3'], theta, g2 + _feed_forward[layer, theta, g2, rows, slice[noise, k4, k5], slice[noise, k5, k6]], [rows, d], m.zeros[0]]
+
+--- a transformer layer's attention block: the attention of the queries x
+--- to kv (flat, in the layer's layout) and its dropout. PyTorch drops the
+--- attention's output as the attention lays it, time-major, so a
+--- batch-first layer's noise is read time-major too
+fn _attention_block[layer, att, theta, x, kv, l, s, n, masks, is_causal, na, nd]
+    d = layer.ints[0]
+    bf = layer.flags[0]
+    q = x
+    k = kv
+    if bf
+        q = x[windows.swapped[n, l, d]]
+        k = kv[windows.swapped[n, s, d]]
+    o = _attention_flat[att, theta, q, k, k, l, s, n, masks, false, true, is_causal, na].output
+    o = functional.dropout[o, layer.floats[0], layer.training, nd]
+    if bf
+        return o[windows.swapped[l, n, d]]
+    return o
+
+--- a transformer layer's feed-forward block: linear2(dropout(activation(
+--- linear1(x)))), then its dropout
+fn _feed_forward[layer, theta, x, rows, nf, n2]
+    f = _run[part[layer, 'linear1'], theta, x, [rows, layer.ints[0]], m.zeros[0]]
+    if layer.word eq 'gelu'
+        f = functional.gelu[f]
+    else
+        f = functional.relu[f]
+    f = functional.dropout[f, layer.floats[0], layer.training, nf]
+    f = _run[part[layer, 'linear2'], theta, f, [rows, layer.ints[2]], m.zeros[0]]
+    return functional.dropout[f, layer.floats[0], layer.training, n2]
+
+--- the noise --------------------------------------------------------------------
+
+--- one dropout's draws in a forward pass: how many, each kept with
+--- probability 1 − p
+struct Site [count, p]
+
+fn _sum_sites[sites]
+    total = 0
+    for site in sites
+        total = total + site.count
+    return total
+
+--- the draws a layer's forward pass on an input of sizes `dims` makes (a
+--- decoder's `other` is its memory's sizes, a transformer's its target's,
+--- an attention's its key's), in the order PyTorch's forward pass makes
+--- them: only the dropouts that draw — in training, with p above 0 and
+--- below 1
+fn _sites[layer, dims, other]
+    f = layer.form
+    out = []
+    if f eq 'sequential'
+        d = dims
+        for p in layer.parts
+            for site in _sites[p, d, other]
+                out = push[out, site]
+            d = _after[p, d]
+        return out
+    if f eq 'transformer_encoder' or f eq 'transformer_decoder'
+        for one in layer.parts[0].parts
+            for site in _sites[one, dims, other]
+                out = push[out, site]
+        return out
+    if f eq 'transformer'
+        for site in _sites[layer.parts[0], dims, [0]]
+            out = push[out, site]
+        for site in _sites[layer.parts[1], other, dims]
+            out = push[out, site]
+        return out
+    if f eq 'transformer_encoder_layer'
+        q = _seq[dims, layer.flags[0]]
+        return _encoder_layer_sites[layer, q.l, q.n]
+    if f eq 'transformer_decoder_layer'
+        if len[other] lt 2
+            halt['a decoder draws for its target and its memory: nn.dropout_noise[model, g, tgt, memory]']
+        q = _seq[dims, layer.flags[0]]
+        r = _seq[other, layer.flags[0]]
+        return _decoder_layer_sites[layer, q.l, r.l, q.n]
+    if f eq 'multihead_attention'
+        q = _seq[dims, layer.flags[3]]
+        positions = q.l
+        if len[other] gt 1
+            positions = _seq[other, layer.flags[3]].l
+        c = _attention_count[layer, q.l, positions, q.n]
+        if c gt 0
+            out = push[out, Site[c, layer.floats[0]]]
+        return out
+    drops = f eq 'dropout' or f eq 'dropout_channels' or f eq 'rnn' or f eq 'lstm' or f eq 'gru'
+    if not (drops and _drawing[layer])
+        return out
+    p = layer.floats[0]
+    if f eq 'dropout'
+        return [Site[shapes.product[dims], p]]
+    if f eq 'dropout_channels'
+        return [Site[functional.channels[dims, layer.ints[0], 'dropout`layer.ints[0]`d'], p]]
+    hout = layer.ints[1]
+    if layer.ints[3] gt 0
+        hout = layer.ints[3]
+    rows = shapes.product[slice[dims, 0, len[dims] - 1]]
+    for l in range[layer.ints[2] - 1]
+        out = push[out, Site[rows * layer.ints[4] * hout, p]]
+    return out
+
+fn _encoder_layer_sites[layer, l, n]
+    out = []
+    a = _attention_count[part[layer, 'self_attn'], l, l, n]
+    if a gt 0
+        out = push[out, Site[a, part[layer, 'self_attn'].floats[0]]]
+    if _drawing[layer]
+        p = layer.floats[0]
+        rows = l * n
+        out = push[out, Site[rows * layer.ints[0], p]]
+        out = push[out, Site[rows * layer.ints[2], p]]
+        out = push[out, Site[rows * layer.ints[0], p]]
+    return out
+
+fn _decoder_layer_sites[layer, t, s, n]
+    out = []
+    p = layer.floats[0]
+    rows = t * n
+    drawing = _drawing[layer]
+    a1 = _attention_count[part[layer, 'self_attn'], t, t, n]
+    if a1 gt 0
+        out = push[out, Site[a1, part[layer, 'self_attn'].floats[0]]]
+    if drawing
+        out = push[out, Site[rows * layer.ints[0], p]]
+    a2 = _attention_count[part[layer, 'multihead_attn'], t, s, n]
+    if a2 gt 0
+        out = push[out, Site[a2, part[layer, 'multihead_attn'].floats[0]]]
+    if drawing
+        out = push[out, Site[rows * layer.ints[0], p]]
+        out = push[out, Site[rows * layer.ints[2], p]]
+        out = push[out, Site[rows * layer.ints[0], p]]
+    return out
+
+--- dropout_noise[model, g, x, y]: the noise a training step's forward pass
+--- on x reads, drawn from the generator g as PyTorch's forward pass draws
+--- it — each dropout's bernoulli(1 − p) over its numbers, in the order the
+--- pass runs them, a dropout of each attention's weights included — beside
+--- g past the draws (`rng.Floats`); y is a decoder's memory, a
+--- transformer's target or an attention's key. Hand the values to the
+--- forward pass as its noise. A model made by nn.module runs by a function
+--- the program writes: draw each part's noise in the order it runs them
+fn dropout_noise[model, g, x, y = 0.0]
+    if model.form eq 'module'
+        halt['a model made by nn.module runs by a forward function the program writes: draw each part’s noise, nn.dropout_noise of the part, in the order the function runs them']
+    out = m.zeros[0]
+    at = g
+    for site in _sites[model, x.shape, (m.zeros[1] + y).shape]
+        d = rng.bernoulli[at, site.count, 1.0 - site.p]
+        out = concat[out, d.values]
+        at = d.generator
+    return rng.Floats[out, at]
+
 --- param[model, theta, path]: a parameter by its name in the model's
 --- state (`weight`, `0.bias`), laid as PyTorch lays it
 fn param[model, theta, path]
@@ -1168,9 +1832,18 @@ fn with_param[model, theta, path, value]
 --- layer's weight kaiming_uniform with a = √5 (within ±1/√ins, by
 --- PyTorch's own arithmetic of the bound), then its bias uniform within
 --- ±1/√ins; a bilinear's both within ±1/√in1; an embedding's normal; a
---- normalization's weight 1 and bias 0; a prelu's its init. It answers
---- theta beside g past the draws (`rng.Floats`)
+--- normalization's weight 1 and bias 0; a prelu's its init; an attention
+--- layer's and a transformer's as multihead_attention and transformer say;
+--- an encoder's or a decoder's layer drawn once, each copy starting from
+--- it. It answers theta beside g past the draws (`rng.Floats`)
 fn parameters[model, g]
+    f = model.form
+    if f eq 'multihead_attention'
+        return _attention_drawn[model, g]
+    if f eq 'transformer_encoder' or f eq 'transformer_decoder'
+        return _stack_drawn[model, g]
+    if f eq 'transformer'
+        return _transformer_drawn[model, g]
     own = _own_drawn[model, g]
     out = own.values
     at = own.generator
@@ -1181,6 +1854,81 @@ fn parameters[model, g]
     --- (a vector, said so: the parts' answers come from this function
     --- itself, which no rank is known of until it is typed)
     return rng.Floats[m.flatten[out], at]
+
+--- Glorot's uniform draw of a weight of sizes `dims` (nn.init's
+--- xavier_uniform: within ±√3 · √(2 / (fan in + fan out)))
+fn _xavier[g, dims]
+    field = shapes.product[slice[dims, 2, len[dims]]]
+    bound = sqrt[3.0] * sqrt[2.0 / float[dims[1] * field + dims[0] * field]]
+    return rng.uniform[g, shapes.product[dims], -bound, bound]
+
+--- an attention layer's parameters, drawn as PyTorch's: out_proj as a
+--- linear layer is made, then in_proj_weight xavier_uniform (or q_, k_ and
+--- v_proj_weight, each), in_proj_bias and out_proj's bias 0, bias_k and
+--- bias_v xavier_normal — laid in the state's order, out_proj last
+fn _attention_drawn[layer, g]
+    e = layer.ints[0]
+    kd = layer.ints[2]
+    vd = layer.ints[3]
+    proj = parameters[layer.parts[0], g]
+    at = proj.generator
+    own = m.zeros[0]
+    if kd eq e and vd eq e
+        d = _xavier[at, [3 * e, e]]
+        own = d.values
+        at = d.generator
+    else
+        dq = _xavier[at, [e, e]]
+        dk = _xavier[dq.generator, [e, kd]]
+        dv = _xavier[dk.generator, [e, vd]]
+        own = concat[concat[dq.values, dk.values], dv.values]
+        at = dv.generator
+    out = proj.values
+    if layer.flags[0]
+        own = concat[own, m.zeros[3 * e]]
+        out = concat[slice[out, 0, e * e], m.zeros[e]]
+    if layer.flags[1]
+        sigma = sqrt[2.0 / float[e + e]]
+        bk = rng.normal[at, e, 0.0, sigma]
+        bv = rng.normal[bk.generator, e, 0.0, sigma]
+        own = concat[concat[own, bk.values], bv.values]
+        at = bv.generator
+    return rng.Floats[concat[own, out], at]
+
+--- an encoder's or a decoder's parameters: its layer drawn once and each
+--- copy starting from it (PyTorch's clones of the layer it is made from),
+--- then its norm's
+fn _stack_drawn[model, g]
+    copies = model.parts[0]
+    one = parameters[copies.parts[0], g]
+    out = m.zeros[0]
+    for c in copies.parts
+        out = concat[out, one.values]
+    at = one.generator
+    if len[model.parts] gt 1
+        d = parameters[model.parts[1], at]
+        out = concat[out, d.values]
+        at = d.generator
+    return rng.Floats[out, at]
+
+--- a transformer's parameters: the encoder's and the decoder's, then each
+--- parameter of two axes or more xavier_uniform in the state's order
+--- (nn.Transformer's _reset_parameters)
+fn _transformer_drawn[model, g]
+    enc = parameters[model.parts[0], g]
+    dec = parameters[model.parts[1], enc.generator]
+    theta = concat[enc.values, dec.values]
+    at = dec.generator
+    out = m.zeros[0]
+    for p in named[model]
+        n = shapes.product[p.dims]
+        piece = slice[theta, p.at - model.at, p.at - model.at + n]
+        if len[p.dims] gt 1
+            d = _xavier[at, p.dims]
+            piece = d.values
+            at = d.generator
+        out = concat[out, piece]
+    return rng.Floats[out, at]
 
 --- the kaiming_uniform bound PyTorch's linear and convolution layers
 --- start their weights within: √3 · gain / √fan_in, the gain a leaky
@@ -1315,7 +2063,34 @@ fn _own_named[layer, prefix]
         return out
     if f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
         return _recurrent_named[layer, prefix]
+    if f eq 'multihead_attention'
+        return _attention_named[layer, prefix]
     return []
+
+--- an attention layer's own parameters, named and laid as PyTorch's:
+--- in_proj_weight (or q_, k_ and v_proj_weight), in_proj_bias, bias_k and
+--- bias_v
+fn _attention_named[layer, prefix]
+    e = layer.ints[0]
+    kd = layer.ints[2]
+    vd = layer.ints[3]
+    at = layer.at
+    out = []
+    if kd eq e and vd eq e
+        out = push[out, Named['`prefix`in_proj_weight', at, [3 * e, e]]]
+        at = at + 3 * e * e
+    else
+        out = push[out, Named['`prefix`q_proj_weight', at, [e, e]]]
+        out = push[out, Named['`prefix`k_proj_weight', at + e * e, [e, kd]]]
+        out = push[out, Named['`prefix`v_proj_weight', at + e * e + e * kd, [e, vd]]]
+        at = at + e * e + e * kd + e * vd
+    if layer.flags[0]
+        out = push[out, Named['`prefix`in_proj_bias', at, [3 * e]]]
+        at = at + 3 * e
+    if layer.flags[1]
+        out = push[out, Named['`prefix`bias_k', at, [1, 1, e]]]
+        out = push[out, Named['`prefix`bias_v', at + e, [1, 1, e]]]
+    return out
 
 --- a recurrent layer's parameters, named and laid as PyTorch's: for each
 --- layer and direction weight_ih, weight_hh, bias_ih, bias_hh and an LSTM's
@@ -1459,28 +2234,33 @@ fn _trained[layer, on]
 --- a layer's output and the layer as running it leaves it
 struct Tracked [out, layer]
 
---- tracked[model, theta, x]: the model with each training batch norm's
---- running statistics moved by the batch x, as PyTorch's forward pass moves
---- them (a sequential's parts in turn; a part of a model the program runs
---- is tracked with its own input)
-fn tracked[model, theta, x]
-    return _tracked[model, theta, m.flatten[x], x.shape].layer
+--- tracked[model, theta, x, noise]: the model with each training batch
+--- norm's running statistics moved by the batch x, as PyTorch's forward
+--- pass moves them (a sequential's parts in turn; a part of a model the
+--- program runs is tracked with its own input), its dropouts reading the
+--- step's noise
+fn tracked[model, theta, x, noise = -1.0]
+    dims = x.shape
+    return _tracked[model, theta, m.flatten[x], dims, _noise_for[model, dims, [0], noise]].layer
 
---- (flat numbers and their sizes, as `_run` takes them)
-fn _tracked[layer, theta, v, dims]
+--- (flat numbers, their sizes and the layer's noise, as `_run` takes them)
+fn _tracked[layer, theta, v, dims, noise]
     if layer.form eq 'sequential'
         h = v
         d = dims
+        k = 0
         kids = []
         for p in layer.parts
-            t = _tracked[p, theta, h, d]
+            c = _sum_sites[_sites[p, d, [0]]]
+            t = _tracked[p, theta, h, d, slice[noise, k, k + c]]
+            k = k + c
             h = t.out
             d = _after[p, d]
             kids = push[kids, t.layer]
         out = layer
         out.parts = kids
         return Tracked[h, out]
-    return Tracked[_run[layer, theta, v, dims], _moved[layer, v, dims]]
+    return Tracked[_run[layer, theta, v, dims, noise], _moved[layer, v, dims]]
 
 --- a training batch norm with its running mean and variance moved toward
 --- the batch's by its momentum (the variance unbiased, as PyTorch's), and its

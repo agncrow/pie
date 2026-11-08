@@ -206,34 +206,62 @@ fn normalize[x, p = 2.0, dim = 1, eps = 0.000000000001]
     n = _norm_along[x, p, a]
     return x ./ shapes.kept[math.flatten[where[n gt eps, n, n * 0.0 + eps]], x.shape, a]
 
---- dropout[x]: each number kept with probability 1 − p and scaled by
---- 1 / (1 − p), as PyTorch's; x itself when not training. The mask is drawn
---- from the seeded generator as the function runs.
-fn dropout[x, p = 0.5, training = true]
+--- dropout[x, p, training, noise]: each number kept where its draw is 1
+--- and scaled by 1 / (1 − p), as PyTorch's (x · (noise / (1 − p))); x
+--- itself when not training or p is 0, zeros where p is 1. The draws are
+--- the generator's, as PyTorch's dropout draws them from its own: noise
+--- holds, for each number of x in order, 1 with probability 1 − p —
+--- `rng.bernoulli[g, n, 1.0 - p].values` — and nn.dropout_noise draws every
+--- dropout a model's forward pass runs. In training, with p between 0 and
+--- 1, a dropout takes its noise
+fn dropout[x, p = 0.5, training = true, noise = -1.0]
     if p lt 0.0 or p gt 1.0
         halt['dropout: p is a probability from 0 to 1, got `p`']
     if (not training) or p eq 0.0
         return x
     if p eq 1.0
         return x * 0.0
-    keep = shapes.laid[math.flatten[bernoulli[1.0 - p, len[math.flatten[x]]]], x.shape]
-    return x .* (keep / (1.0 - p))
+    keep = noise_of[noise, len[math.flatten[x]], 'dropout']
+    return x .* shapes.laid[keep / (1.0 - p), x.shape]
 
---- dropout1d[x, p, training]: each channel of x `[n, c, l]` (or `[c,
---- l]`) zeroed whole with probability p and the rest scaled by 1 / (1 −
---- p) (F.dropout1d); dropout2d and dropout3d over two and three spatial
---- axes. The channels kept are drawn from the seeded generator
-fn dropout1d[x, p = 0.5, training = true]
-    return _channel_dropout[math.flatten[x], x.shape, p, training, 1, 'dropout1d']
+--- noise_of[noise, n, what]: the draws a dropout reads, flat — n of them,
+--- each 0 or 1; −1, the noise of none, halts (a dropout in training reads
+--- its draws)
+fn noise_of[noise, n, what]
+    given = math.flatten[math.zeros[1] + noise]
+    if len[given] eq 1 and given[0] lt 0.0
+        halt['`what` in training reads its draws: hand it noise of `n` numbers — rng.bernoulli[g, `n`, 1.0 - p].values draws them as PyTorch draws them, and nn.dropout_noise draws a model’s']
+    if len[given] ne n
+        halt['`what`: the noise holds `len[given]` numbers, and `n` are drawn']
+    return given
 
-fn dropout2d[x, p = 0.5, training = true]
-    return _channel_dropout[math.flatten[x], x.shape, p, training, 2, 'dropout2d']
+--- dropout1d[x, p, training, noise]: each channel of x `[n, c, l]` (or
+--- `[c, l]`) zeroed whole where its draw is 0 and the rest scaled by 1 /
+--- (1 − p) (F.dropout1d); dropout2d and dropout3d over two and three
+--- spatial axes. One draw a channel, in order (n·c of them, or c), as
+--- PyTorch draws them; dropout2d of three axes reads them `[n, c, l]`, as
+--- PyTorch 2.8 does (with its warning)
+fn dropout1d[x, p = 0.5, training = true, noise = -1.0]
+    return _channel_dropout[math.flatten[x], x.shape, p, training, 1, 'dropout1d', noise]
 
-fn dropout3d[x, p = 0.5, training = true]
-    return _channel_dropout[math.flatten[x], x.shape, p, training, 3, 'dropout3d']
+fn dropout2d[x, p = 0.5, training = true, noise = -1.0]
+    if len[x.shape] eq 3
+        return _channel_dropout[math.flatten[x], x.shape, p, training, 1, 'dropout2d', noise]
+    return _channel_dropout[math.flatten[x], x.shape, p, training, 2, 'dropout2d', noise]
+
+fn dropout3d[x, p = 0.5, training = true, noise = -1.0]
+    return _channel_dropout[math.flatten[x], x.shape, p, training, 3, 'dropout3d', noise]
+
+--- channels[dims, d, what]: how many draws a channel dropout over d
+--- spatial axes reads of a tensor of sizes dims (dropout2d of three axes
+--- reads d as 1)
+fn channels[dims, d, what]
+    if d eq 2 and len[dims] eq 3
+        return windows.planes_of[dims, 1, what].count
+    return windows.planes_of[dims, d, what].count
 
 --- (the flat numbers v of a tensor laid `dims`, so one copy takes every rank)
-fn _channel_dropout[v, dims, p, training, d, what]
+fn _channel_dropout[v, dims, p, training, d, what, noise]
     if p lt 0.0 or p gt 1.0
         halt['`what`: p is a probability from 0 to 1, got `p`']
     if (not training) or p eq 0.0
@@ -241,7 +269,7 @@ fn _channel_dropout[v, dims, p, training, d, what]
     if p eq 1.0
         return shapes.laid[v * 0.0, dims]
     given = windows.planes_of[dims, d, what]
-    keep = math.flatten[bernoulli[1.0 - p, given.count]] / (1.0 - p)
+    keep = noise_of[noise, given.count, what] / (1.0 - p)
     inner = shapes.product[given.sizes]
     mask = math.flatten[reshape[keep, given.count, 1] + reshape[math.zeros[inner], 1, inner]]
     return shapes.laid[v .* mask, dims]
@@ -1424,3 +1452,393 @@ fn gru_step[gi, gh, h]
     z = sigmoid[_cols[gh, hidden, hidden] + _cols[gi, hidden, hidden]]
     n = math.tanh[_cols[gi, 2 * hidden, hidden] + _cols[gh, 2 * hidden, hidden] .* r]
     return (h - n) .* z + n
+
+--- attention ---------------------------------------------------------------------
+
+--- an attention's answer: its output and, where asked for, its weights
+--- (no numbers otherwise)
+struct Attention [output, weights]
+
+--- causal_mask[l, s]: the float mask of a causal attention, 0 on and
+--- below the diagonal and −∞ above it (PyTorch's lower triangle as a float
+--- mask; nn.Transformer.generate_square_subsequent_mask of l·l)
+fn causal_mask[l, s]
+    out = []
+    for i in range[l]
+        for j in range[s]
+            if j gt i
+                out = push[out, 0.0 - inf]
+            else
+                out = push[out, 0.0]
+    return reshape[tensor[out], l, s]
+
+--- scaled_dot_product_attention[q, k, v, attn_mask, dropout_p, is_causal,
+--- scale, noise]: softmax(q · kᵀ · scale + mask) · v over the last two
+--- axes of q `[…, L, E]`, k `[…, S, E]` and v `[…, S, Ev]`, the axes
+--- before them a batch (F.scaled_dot_product_attention). The mask is a
+--- float mask, added — 0 where a position takes part, −∞ where it does
+--- not — of `[L, S]` or of any sizes that broadcast to `[…, L, S]`;
+--- is_causal masks what lies above the diagonal, and takes no mask beside
+--- it; the scale is 1/√E unless given. With dropout_p above 0 the weights
+--- are dropped as F.dropout drops them, by noise of their size `[…, L, S]`
+fn scaled_dot_product_attention[q, k, v, attn_mask = 0.0, dropout_p = 0.0, is_causal = false, scale = 0.0, noise = -1.0]
+    qd = q.shape
+    kd = k.shape
+    vd = v.shape
+    r = len[qd]
+    if r lt 2 or len[kd] ne r or len[vd] ne r
+        halt['scaled_dot_product_attention: q, k and v take one rank of 2 or more, and have `r`, `len[kd]` and `len[vd]`']
+    lead = slice[qd, 0, r - 2]
+    if not (slice[kd, 0, r - 2] eq lead and slice[vd, 0, r - 2] eq lead)
+        halt['scaled_dot_product_attention: q, k and v take one batch, and are `str[qd]`, `str[kd]` and `str[vd]`']
+    l = qd[r - 2]
+    emb = qd[r - 1]
+    s = kd[r - 2]
+    ev = vd[r - 1]
+    if kd[r - 1] ne emb or vd[r - 2] ne s
+        halt['scaled_dot_product_attention: k `str[kd]` and v `str[vd]` do not fit q `str[qd]`']
+    by = scale
+    if by eq 0.0
+        by = 1.0 / sqrt[float[emb]]
+    count = shapes.product[lead]
+    mask = _attention_mask[attn_mask, concat[lead, [l, s]], is_causal, 'scaled_dot_product_attention']
+    keep = math.zeros[0]
+    if dropout_p gt 0.0 and dropout_p lt 1.0
+        keep = noise_of[noise, count * l * s, 'scaled_dot_product_attention']
+    weighed = _attended[math.flatten[q], math.flatten[k], math.flatten[v], mask, count, l, s, emb, ev, by, dropout_p, keep]
+    return shapes.laid[weighed.output, concat[lead, [l, ev]]]
+
+--- a float mask broadcast to `dims` (`[…, L, S]`), flat: zeros where none
+--- is given, the causal triangle where asked
+fn _attention_mask[attn_mask, dims, is_causal, what]
+    given = math.zeros[1] + attn_mask
+    gv = math.flatten[given]
+    r = len[dims]
+    l = dims[r - 2]
+    s = dims[r - 1]
+    count = shapes.product[dims] / (l * s)
+    if is_causal
+        if len[gv] ne 1 or gv[0] ne 0.0
+            halt['`what`: an explicit attn_mask is not set when is_causal is true']
+        return windows.tiled[math.flatten[causal_mask[l, s]], count]
+    if len[gv] eq 1
+        return math.zeros[shapes.product[dims]] + gv[0]
+    if len[gv] eq l * s
+        return windows.tiled[gv, count]
+    return _broadcast[gv, given.shape, dims, what]
+
+--- given `gdims` broadcast to `dims`, flat: the axes aligned at the end,
+--- each of given's 1 or the size it meets
+fn _broadcast[given, gdims, dims, what]
+    r = len[dims]
+    k = len[gdims]
+    if k gt r
+        halt['`what`: the mask `str[gdims]` does not broadcast to `str[dims]`']
+    strides = []
+    for a in range[r]
+        strides = push[strides, 0]
+    step = 1
+    for j in range[k]
+        a = k - 1 - j
+        o = r - 1 - j
+        if gdims[a] eq dims[o]
+            strides[o] = step
+        else
+            if gdims[a] ne 1
+                halt['`what`: the mask `str[gdims]` does not broadcast to `str[dims]`']
+        step = step * gdims[a]
+    pos = []
+    for t in range[shapes.product[dims]]
+        rest = t
+        at = 0
+        for j in range[r]
+            a = r - 1 - j
+            at = at + (rest % dims[a]) * strides[a]
+            rest = rest / dims[a]
+        pos = push[pos, float[at]]
+    return given[tensor[pos]]
+
+--- each of `count` attentions over flat q `[count, l, e]`, k `[count, s,
+--- e]` and v `[count, s, ev]` with the flat mask `[count, l, s]`: the
+--- scores (q · by) · kᵀ + mask, their softmax along each row, dropped by
+--- `keep` where p is above 0, then the weights · v (`Attention`, flat)
+fn _attended[qv, kv, vv, mask, count, l, s, emb, ev, by, p, keep]
+    outs = []
+    ws = []
+    for b in range[count]
+        qb = reshape[slice[qv, b * l * emb, (b + 1) * l * emb], l, emb]
+        kb = reshape[slice[kv, b * s * emb, (b + 1) * s * emb], s, emb]
+        vb = reshape[slice[vv, b * s * ev, (b + 1) * s * ev], s, ev]
+        scores = (qb * by) * transpose[kb] + reshape[slice[mask, b * l * s, (b + 1) * l * s], l, s]
+        w = softmax[scores, 1]
+        if p gt 0.0
+            w = reshape[math.flatten[dropout[w, p, true, slice[keep, b * l * s, (b + 1) * l * s]]], l, s]
+        outs = push[outs, math.flatten[w * vb]]
+        ws = push[ws, math.flatten[w]]
+    return Attention[math.flatten[math.stack[outs]], math.flatten[math.stack[ws]]]
+
+--- the heads of x `[rows·n, h·hd]` (a row for each position and batch),
+--- flat as `[n·h, rows, hd]`: PyTorch's view(rows, n·h, hd).transpose(0, 1)
+fn _heads[x, rows, n, h, hd]
+    emb = h * hd
+    firsts = []
+    for b in range[n * h]
+        firsts = push[firsts, float[(b / h) * emb + (b % h) * hd]]
+    pos = reshape[tensor[firsts], n * h, 1, 1] + reshape[tensor[range[rows]] * float[n * emb], 1, rows, 1] + reshape[tensor[range[hd]], 1, 1, hd]
+    return math.flatten[x][math.flatten[pos]]
+
+--- the heads' outputs `[n·h, rows, hd]`, flat, joined back as rows of
+--- each position and batch `[rows·n, h·hd]` (transpose(0, 1) and view)
+fn _joined_heads[o, rows, n, h, hd]
+    firsts = []
+    for i in range[rows]
+        for nb in range[n]
+            firsts = push[firsts, float[nb * h * rows * hd + i * hd]]
+    pos = reshape[tensor[firsts], rows * n, 1, 1] + reshape[tensor[range[h]] * float[rows * hd], 1, h, 1] + reshape[tensor[range[hd]], 1, 1, hd]
+    return reshape[o[math.flatten[pos]], rows * n, h * hd]
+
+--- rows `[s·n, e]` (each position's, batch by batch) with one position
+--- more: `extra` (e numbers) for every batch
+fn _with_row[x, n, emb, extra]
+    return concat[x, reshape[windows.tiled[extra, n], n, emb]]
+
+--- x laid `[rows, cols]`, flat, with k zeros after each row
+fn _padded[x, rows, cols, k]
+    return math.flatten[concat[reshape[x, rows, cols], math.zeros[rows, k], axis = 1]]
+
+--- a padding mask `[n, s]`, flat, as each head's rows meet it: `[n, h, l,
+--- s]` (PyTorch's view(n, 1, 1, s).expand(-1, h, -1, -1))
+fn _padding_rows[kpm, n, h, l, s]
+    out = math.zeros[0]
+    for nb in range[n]
+        out = concat[out, windows.tiled[slice[kpm, nb * s, (nb + 1) * s], h * l]]
+    return out
+
+--- weights `[n, h, l·s]`, flat, averaged over the heads: their sum, then
+--- divided (PyTorch's mean, a sum and a division)
+fn _head_mean[w, n, h, per]
+    out = math.zeros[0]
+    for nb in range[n]
+        acc = slice[w, nb * h * per, nb * h * per + per]
+        for hh in range[1, h]
+            acc = acc + slice[w, (nb * h + hh) * per, (nb * h + hh + 1) * per]
+        out = concat[out, acc / float[h]]
+    return out
+
+--- an attention layer's parameters, flat, PyTorch's (a vector of no
+--- numbers where one is none): the packed in_proj_weight `[3E, E]` or the
+--- separate q_, k_ and v_proj_weight, in_proj_bias, bias_k and bias_v (E
+--- numbers each), and out_proj's weight and bias
+struct Projections [in_w, in_b, q_w, k_w, v_w, bias_k, bias_v, out_w, out_b]
+
+--- an attention's masks, flat: attn_mask's numbers (none where none is
+--- given), how many attentions they mask — 1 for `[L, S]`, N·heads for
+--- `[N·heads, L, S]` — and its number of axes (0 for none), and the padding
+--- mask's numbers `[N, S]` (none where none is given)
+struct Masks [attention, groups, axes, padding]
+
+--- masks_of[attn_mask, key_padding_mask, l, s, n, heads, is_causal]: an
+--- attention's float masks checked against l queries of s keys for n items
+--- as PyTorch's multi_head_attention_forward checks them (`Masks`); a mask
+--- of one number is none, and is_causal takes an attn_mask beside it
+fn masks_of[attn_mask, key_padding_mask, l, s, n, heads, is_causal]
+    am = math.zeros[1] + attn_mask
+    amv = math.flatten[am]
+    ad = am.shape
+    groups = 1
+    axes = len[ad]
+    if len[amv] eq 1
+        if is_causal
+            halt['Need attn_mask if specifying the is_causal hint. You may use the Transformer module method ‘generate_square_subsequent_mask’ to create this mask.']
+        amv = math.zeros[0]
+        axes = 0
+    else
+        if axes eq 3
+            groups = n * heads
+            if not (ad eq [n * heads, l, s])
+                halt['The shape of the 3D attn_mask is `str[ad]`, but should be `str[[n * heads, l, s]]`.']
+        else
+            if axes ne 2
+                halt['attn_mask’s dimension `axes` is not supported']
+            if not (ad eq [l, s])
+                halt['The shape of the 2D attn_mask is `str[ad]`, but should be `str[[l, s]]`.']
+    kpm = math.flatten[math.zeros[1] + key_padding_mask]
+    if len[kpm] eq 1
+        kpm = math.zeros[0]
+    else
+        if len[kpm] ne n * s
+            halt['expecting key_padding_mask shape of `str[[n, s]]`, but it holds `len[kpm]` numbers']
+    return Masks[amv, groups, axes, kpm]
+
+--- multi_head_flat[q, k, v, l, s, n, e, kdim, vdim, heads, pr, zero_attn,
+--- p, masks, need_weights, average, is_causal, keep]: the attention of
+--- multi_head_attention_forward on flat numbers, each laid time-major: the
+--- queries q `[L, N, E]`, the keys k `[S, N, kdim]` and the values v `[S,
+--- N, vdim]`, its parameters `pr` (`Projections`) and masks (`Masks`),
+--- the weights dropped by `keep` where p is above 0. It answers the output
+--- `[L, N, E]` and, where need_weights, the weights `[N, heads, L, S]`
+--- (`[N, L, S]` averaged), flat (`Attention`); S counts bias_k's and the
+--- zero attention's positions
+fn multi_head_flat[q, k, v, l, s, n, emb, kdim, vdim, heads, pr, zero_attn, p, masks, need_weights, average, is_causal, keep]
+    h = heads
+    hd = emb / h
+    --- the projections: a row for each position and batch
+    wq = math.zeros[emb, emb]
+    wk = math.zeros[emb, kdim]
+    wv = math.zeros[emb, vdim]
+    if len[pr.in_w] gt 0
+        wq = reshape[slice[pr.in_w, 0, emb * emb], emb, emb]
+        wk = reshape[slice[pr.in_w, emb * emb, 2 * emb * emb], emb, emb]
+        wv = reshape[slice[pr.in_w, 2 * emb * emb, 3 * emb * emb], emb, emb]
+    else
+        wq = reshape[pr.q_w, emb, emb]
+        wk = reshape[pr.k_w, emb, kdim]
+        wv = reshape[pr.v_w, emb, vdim]
+    bias = pr.in_b
+    if len[bias] eq 0
+        bias = math.zeros[3 * emb]
+    qp = linear[reshape[q, l * n, emb], wq, slice[bias, 0, emb]]
+    kp = linear[reshape[k, s * n, kdim], wk, slice[bias, emb, 2 * emb]]
+    vp = linear[reshape[v, s * n, vdim], wv, slice[bias, 2 * emb, 3 * emb]]
+    --- the masks, and bias_k and bias_v after the keys and values
+    groups = masks.groups
+    amv = masks.attention
+    if len[amv] eq 0
+        amv = math.zeros[l * s]
+        groups = 1
+    padded = len[masks.padding] gt 0
+    kpm = masks.padding
+    if not padded
+        kpm = math.zeros[n * s]
+    width = s
+    if len[pr.bias_k] gt 0
+        kp = _with_row[kp, n, emb, pr.bias_k]
+        vp = _with_row[vp, n, emb, pr.bias_v]
+        amv = _padded[amv, groups * l, width, 1]
+        kpm = _padded[kpm, n, width, 1]
+        width = width + 1
+    --- the heads, `[N·heads, S, hd]`, and the zero attention after them
+    qh = _heads[qp, l, n, h, hd]
+    kh = _heads[kp, width, n, h, hd]
+    vh = _heads[vp, width, n, h, hd]
+    if zero_attn
+        kh = _padded[kh, n * h, width * hd, hd]
+        vh = _padded[vh, n * h, width * hd, hd]
+        amv = _padded[amv, groups * l, width, 1]
+        kpm = _padded[kpm, n, width, 1]
+        width = width + 1
+    --- each head's mask: the attention's, then its batch's padding; the
+    --- causal triangle itself where PyTorch hands the hint on to its
+    --- attention (no padding, no weights asked)
+    joined_mask = windows.tiled[amv, (n * h) / groups]
+    if padded
+        joined_mask = joined_mask + _padding_rows[kpm, n, h, l, width]
+    if is_causal and not padded and not need_weights
+        joined_mask = windows.tiled[math.flatten[causal_mask[l, width]], n * h]
+    weighed = _attended[qh, kh, vh, joined_mask, n * h, l, width, hd, hd, sqrt[1.0 / float[hd]], p, keep]
+    ob = pr.out_b
+    if len[ob] eq 0
+        ob = math.zeros[emb]
+    out = math.flatten[linear[_joined_heads[weighed.output, l, n, h, hd], reshape[pr.out_w, emb, emb], ob]]
+    if not need_weights
+        return Attention[out, math.zeros[0]]
+    if average
+        return Attention[out, _head_mean[weighed.weights, n, h, l * width]]
+    return Attention[out, weighed.weights]
+
+--- a parameter given, flat, or none: x where it holds `count` numbers
+--- laid in `axes` axes or `count` above 1, no numbers otherwise
+fn _given_or_none[x, count, axes]
+    t = math.zeros[1] + x
+    v = math.flatten[t]
+    if len[v] eq count and (count gt 1 or len[t.shape] eq axes)
+        return v
+    return math.zeros[0]
+
+--- multi_head_attention_forward[query, key, value, embed_dim_to_check,
+--- num_heads, in_proj_weight, in_proj_bias, bias_k, bias_v, add_zero_attn,
+--- dropout_p, out_proj_weight, out_proj_bias, …]: PyTorch's
+--- F.multi_head_attention_forward. query `[L, N, E]`, key `[S, N, kdim]`
+--- and value `[S, N, vdim]` (or `[L, E]`, … unbatched) are each projected
+--- — by the packed in_proj_weight `[3E, E]`, or q_, k_ and v_proj_weight
+--- where use_separate_proj_weight — and split into num_heads heads; each
+--- head's weights are softmax(q · kᵀ / √(E/heads) + masks), its output
+--- the weights · v, and the heads are joined and projected out. bias_k and
+--- bias_v `[1, 1, E]` (0 for none) are appended to the keys and values,
+--- add_zero_attn appends zeros after them. The masks are float masks,
+--- added: attn_mask `[L, S]` or `[N·heads, L, S]`, key_padding_mask `[N,
+--- S]` (`[S]` unbatched); is_causal is PyTorch's hint that attn_mask is
+--- causal (without the weights or a padding mask, the causal triangle is
+--- what attends, as PyTorch's). In training, dropout_p drops the weights
+--- by noise of their size `[N·heads, L, S]`. It answers the output `[L, N,
+--- E]` and, where need_weights, the weights: `[N, L, S]` averaged over the
+--- heads, or `[N, heads, L, S]` (`Attention`)
+fn multi_head_attention_forward[query, key, value, embed_dim_to_check, num_heads, in_proj_weight, in_proj_bias, bias_k, bias_v, add_zero_attn, dropout_p, out_proj_weight, out_proj_bias, training = true, key_padding_mask = 0.0, need_weights = true, attn_mask = 0.0, use_separate_proj_weight = false, q_proj_weight = 0.0, k_proj_weight = 0.0, v_proj_weight = 0.0, average_attn_weights = true, is_causal = false, noise = -1.0]
+    qd = query.shape
+    kd = key.shape
+    vd = value.shape
+    batched = len[qd] eq 3
+    if batched
+        if len[kd] ne 3 or len[vd] ne 3
+            halt['For batched (3-D) ‘query’, expected ‘key’ and ‘value’ to be 3-D but found `len[kd]`-D and `len[vd]`-D tensors respectively']
+    else
+        if len[qd] ne 2
+            halt['query should be unbatched 2D or batched 3D tensor but received `len[qd]`-D query tensor']
+        if len[kd] ne 2 or len[vd] ne 2
+            halt['For unbatched (2-D) ‘query’, expected ‘key’ and ‘value’ to be 2-D but found `len[kd]`-D and `len[vd]`-D tensors respectively']
+    l = qd[0]
+    n = 1
+    if batched
+        n = qd[1]
+    emb = qd[len[qd] - 1]
+    if emb ne embed_dim_to_check
+        halt['was expecting embedding dimension of `embed_dim_to_check`, but got `emb`']
+    h = num_heads
+    if (emb / h) * h ne emb
+        halt['embed_dim `emb` not divisible by num_heads `h`']
+    s = kd[0]
+    kdim = kd[len[kd] - 1]
+    vdim = vd[len[vd] - 1]
+    if not (slice[kd, 0, len[kd] - 1] eq slice[vd, 0, len[vd] - 1])
+        halt['key shape `str[kd]` does not match value shape `str[vd]`']
+    none = math.zeros[0]
+    pr = Projections[none, math.flatten[math.zeros[3 * emb] + in_proj_bias], none, none, none, _given_or_none[bias_k, emb, 3], _given_or_none[bias_v, emb, 3], math.flatten[out_proj_weight], math.flatten[math.zeros[emb] + out_proj_bias]]
+    if use_separate_proj_weight
+        pr.q_w = math.flatten[math.zeros[1] + q_proj_weight]
+        pr.k_w = math.flatten[math.zeros[1] + k_proj_weight]
+        pr.v_w = math.flatten[math.zeros[1] + v_proj_weight]
+        if len[pr.q_w] ne emb * emb or len[pr.k_w] ne emb * kdim or len[pr.v_w] ne emb * vdim
+            halt['the separate projection weights take `str[[emb, emb]]`, `str[[emb, kdim]]` and `str[[emb, vdim]]`']
+    else
+        if kdim ne emb or vdim ne emb
+            halt['a packed in_proj_weight takes keys and values of `emb` features, and they have `kdim` and `vdim`: use_separate_proj_weight']
+        pr.in_w = math.flatten[math.zeros[1] + in_proj_weight]
+        if len[pr.in_w] ne 3 * emb * emb
+            halt['in_proj_weight takes `str[[3 * emb, emb]]`, and holds `len[pr.in_w]` numbers']
+    if (len[pr.bias_k] eq 0) ne (len[pr.bias_v] eq 0)
+        halt['bias_k and bias_v are given together, or neither']
+    masks = masks_of[attn_mask, key_padding_mask, l, s, n, h, is_causal]
+    p = dropout_p
+    if not training
+        p = 0.0
+    width = s
+    if len[pr.bias_k] gt 0
+        width = width + 1
+    if add_zero_attn
+        width = width + 1
+    keep = none
+    if p gt 0.0 and p lt 1.0
+        keep = noise_of[noise, n * h * l * width, 'multi_head_attention_forward']
+    weighed = multi_head_flat[math.flatten[query], math.flatten[key], math.flatten[value], l, s, n, emb, kdim, vdim, h, pr, add_zero_attn, p, masks, need_weights, average_attn_weights, is_causal, keep]
+    dims = [l, n, emb]
+    if not batched
+        dims = [l, emb]
+    output = shapes.laid[weighed.output, dims]
+    if not need_weights
+        return Attention[output, none]
+    wdims = [n, h, l, width]
+    if average_attn_weights
+        wdims = [n, l, width]
+    if not batched
+        wdims = slice[wdims, 1, len[wdims]]
+    return Attention[output, shapes.laid[weighed.weights, wdims]]

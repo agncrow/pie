@@ -1,8 +1,9 @@
 #!/bin/bash
 # Pie's whole suite against a crow binary, from this repository's root:
 # each package's test blocks and its example in both modes, the parity
-# programs (interpreted against compiled), and the RAG example's tests from
-# its recorded fixtures in both modes.
+# programs (interpreted against compiled), the book's examples (each run in
+# both modes and held to the output the page shows), and the RAG example's
+# tests from its recorded fixtures in both modes.
 # Usage: ./test.sh [path to crow]   (the crow on the PATH by default)
 set -u
 CROW=${1:-crow}
@@ -18,6 +19,7 @@ step() {
 }
 step packages "$CROW" test --packages
 step parity "$CROW" test --parity
+step book "$CROW" test --book
 rag() {
     (cd examples/rag && "$CROW" test chat/corpus.co && "$CROW" test chat/retrieve.co && "$CROW" test --fixtures chat/page.co && "$CROW" test --fixtures --compiled chat/page.co)
 }

@@ -31,12 +31,12 @@ did.
 
 | Package | What it is | Held to |
 |---|---|---|
-| `nn` | tensors' activations, losses and layers — linear, convolutions and their transposes, poolings, paddings, resamplings, recurrent layers (RNN, LSTM, GRU), norms, embeddings; modules, the model as one parameter vector, initialisers (`nn.init`), the functional forms; `nn.optim` (SGD, Adam, AdamW, Adamax, NAdam, RAdam, RMSprop, Adagrad, Adadelta, ASGD, Rprop) and `nn.lr_scheduler`; gradient clipping; torch's generator (`nn.rng`); loaders, samplers and splits (`nn.data`); weights saved and loaded as safetensors (`nn.safetensors`) | PyTorch (float64), and the safetensors library byte for byte |
+| `nn` | tensors' activations, losses and layers — linear, convolutions and their transposes, poolings, paddings, resamplings, recurrent layers (RNN, LSTM, GRU), attention (scaled dot-product, multi-head) and transformers (encoder and decoder layers and stacks, `nn.Transformer`), norms, embeddings, dropouts; modules, the model as one parameter vector, initialisers (`nn.init`), the functional forms; `nn.optim` (SGD, Adam, AdamW, Adamax, NAdam, RAdam, RMSprop, Adagrad, Adadelta, ASGD, Rprop) and `nn.lr_scheduler`; gradient clipping; torch's generator (`nn.rng`); loaders, samplers and splits (`nn.data`); weights saved and loaded as safetensors (`nn.safetensors`) | PyTorch (float64), and the safetensors library byte for byte |
 | `stats` | descriptive statistics, correlation, tests, fits | scipy |
 | `models` | the classical models, metrics, cross-validation | scikit-learn |
 | `optimize` | scalar and multivariate minimisers, roots | scipy.optimize |
 | `symbolic` | symbolic regression | PySR |
-| `gpt` | nanoGPT | PyTorch |
+| `gpt` | nanoGPT's model and training, on nn (docs/gpt-design.md) | nanoGPT in PyTorch |
 | `graph` | graphs, paths, ranks | networkx |
 | `retrieval` | TF-IDF, BM25 | scikit-learn, rank_bm25 |
 | `vectors` | an exact vector index | faiss |
@@ -54,19 +54,29 @@ holds a model as two values:
   to end (as `torch.nn.utils.parameters_to_vector` lays them).
 
 A forward pass reads a layer's weight as `reshape[slice[theta, at, at +
-n], rows, columns]`; `grad[loss][theta, x, y]` answers one vector, the gradient of
-every parameter at once; an optimiser is arithmetic over vectors (Adam is
-element-wise, so the whole model is one update, exactly PyTorch's per
-tensor update); `nn.named[spec, theta]` gives the parameters back by
-PyTorch's names (`0.weight`, `0.bias`, …), which is the state dict, and
-loading PyTorch's state dict lays the tensors into `theta` in the same
-order. The one place this reads differently from PyTorch is the step:
+n], rows, columns]`; `grad[loss][model, theta, batch]` answers one vector,
+the gradient of every parameter at once (the model and the batch are
+records, constants of the run); an optimiser is arithmetic over vectors
+(Adam is element-wise, so the whole model is one update, exactly
+PyTorch's per tensor update); `nn.state[model, theta]` gives the
+parameters back by PyTorch's names (`0.weight`, `0.bias`, …), which is the
+state dict, and `nn.from_state[model, state]` lays a state dict's tensors
+into `theta` by those names. The one place this reads differently from
+PyTorch is the step:
 
 ```
-g = grad[loss][theta, x, y]          --- loss.backward()
-opt = optim.step[opt, theta, g]      --- optimizer.step()
-theta = opt.theta
+g = grad[loss][model, opt.theta, batch]   --- loss.backward()
+opt = optim.step[opt, g]                  --- optimizer.step(); opt.theta is the new theta
 ```
+
+A model whose layers run one after another is `nn.sequential`, and
+`nn.forward` runs it. A model whose forward pass is code — a residual
+stream, a weight shared by two layers, nanoGPT's `forward` — is
+`nn.module[map[…]]` (torch's ModuleDict: parts by name) and
+`nn.module_list[[…]]` (ModuleList: parts by position), run by a function
+the program writes, each part reached by `nn.part[model, name]` and run by
+`nn.forward`; its state's names are the parts' paths
+(`transformer.h.0.attn.c_attn.weight`), as torch's are.
 
 ## A forward pass hands its numbers flat
 
@@ -187,6 +197,71 @@ hidden and cell states (`output, (h_n, c_n) = lstm(x, (h0, c0))`).
 `held_spatial.co` holds every convolution, pooling, padding, resampling and
 recurrent layer to PyTorch, value and gradients, to 1e-12.
 
+## Attention and transformers
+
+`F.scaled_dot_product_attention` is softmax(q·kᵀ·scale + mask)·v over the
+last two axes, the axes before them a batch, `is_causal` the triangle.
+`nn.multihead_attention` is `nn.MultiheadAttention` — its parameters
+PyTorch's (`in_proj_weight`, or `q_proj_weight`, `k_proj_weight` and
+`v_proj_weight` where the keys or the values are of other sizes;
+`in_proj_bias`; `bias_k` and `bias_v`; `out_proj`), drawn as PyTorch draws
+them — run by `nn.attend` (`F.multi_head_attention_forward`): heads,
+key padding, `add_zero_attn`, batch-first, the weights averaged over the
+heads or not. `nn.transformer_encoder_layer` and
+`nn.transformer_decoder_layer` (post-norm or `norm_first`, relu or gelu),
+their stacks (`nn.transformer_encoder`, `nn.transformer_decoder`: copies of
+the layer's parameters, as torch clones them) and `nn.transformer` (every
+parameter of two axes or more drawn again xavier_uniform, as
+`nn.Transformer` does) run by `nn.encode`, `nn.decode` and
+`nn.transform`. A mask is a float mask — 0 where a position takes part,
+−∞ where it does not — added to the scores, a padding mask likewise; an
+encoder or a decoder reads a mask that is the causal triangle as causal,
+as torch's `_detect_is_causal_mask` does, since torch then takes another
+path through the attention. `held_attention.co` holds each function and
+layer to PyTorch, value and gradients, to 1e-12 (parity 008 holds it in
+both modes).
+
+## Dropout reads the noise drawn for the pass
+
+A torch dropout draws its mask inside the forward pass. A function `grad`
+differentiates draws nothing it is differentiated through, and a step's
+loss and its gradient must be one pass's, so in pie the masks are an input:
+`nn.dropout_noise[model, g, x]` draws every mask a training pass over x
+draws — each dropout's `bernoulli(1 − p)` over its numbers, an attention's
+over its weights, the dropout between a recurrent layer's layers — from a
+torch generator, in the order and the layout PyTorch's forward pass draws
+them (a batch-first transformer layer drops its attention's output as the
+attention lays it, time-major), and the forward pass takes them as
+`noise`. A layer in training with a dropout refuses a pass without its
+noise; `nn.eval[model]` makes a model that draws none. A program running
+its own forward function draws each part's noise in the order it runs the
+parts, as gpt's `dropout_noise` does for nanoGPT's.
+
+## On the GPU
+
+A program that writes `gpu[]` before it makes its model trains it on the
+GPU with nothing else changed: theta, the batch and every tensor computed
+from them are placed there (crow's spec, GPU Support), the forward pass,
+`grad`'s backward pass and the optimiser's step run there — gathers and
+their gradients, a softmax's max and its gradient among them — and a
+number comes back only where the program reads one. The GPU computes in
+f32, so a run agrees with the CPU's to f32's digits rather than exactly:
+`nn/held_gpu.co` trains a perceptron six steps of Adam on both and holds
+their losses within 1e-4 (they are 3e-8 apart), and gpt's first gradient
+is 2e-7 of its largest number apart. AdamW then carries that difference
+on, as it carries any difference in the last digits: forty steps of gpt
+end 0.5% apart.
+
+Measured on an M4 Max, with other work running: a perceptron of 256 →
+1024 → 1024 → 10 on a batch of 512 takes 5–7 ms an Adam step on the GPU
+against 50–70 ms on the CPU, and a product of two 2048 × 2048 matrices
+runs at 1.5 TFLOP/s against faer's 0.2 in float64. Each operation costs
+10–50 µs of the GPU's time however small it is, and a read of a number is
+a round trip of about 1.5 ms, so a small model trains faster on the CPU:
+gpt's example, two layers 32 wide over blocks of 16, takes 0.7 s for 40
+steps there and 8 s on the GPU. The GPU is for models whose operations
+are large — wide layers, long blocks, big batches.
+
 ## What crow had to grow
 
 `grad` reads a tensor's numbers only through the operations on its list,
@@ -205,9 +280,27 @@ differentiate was added to `grad` in crow (pie has no tape of its own):
   differentiated: a table of positions built from a tensor's sizes, a
   `str` of a size, a draw;
 - a value that can fail holds its traced number, as a size read from
-  parsed text does in the spatial check, and `log` prints a traced value.
+  parsed text does in the spatial check, and `log` prints a traced value;
+- every number and tensor a differentiated function's locals hold is held
+  traced throughout the compiled copy: a local given a plain value first
+  and a traced one later (`p = layer.floats[0]`, then `p = 0.0`) had not
+  built.
 
-Each is a parity program in crow, in both modes (crow's parity 490–519).
+- the GPU under every operation a network computes (crow's parity
+  520–522): a tensor made of a list placed by `gpu[]`, an operation
+  meeting a view, a broadcast or an operand on the CPU run there, the
+  matrix product a kernel of 64 × 64 tiles reading each operand through
+  its strides, reductions along a long axis shared by a workgroup, a
+  gather and its gradient, the gradient of a softmax's max found there,
+  and the loss's sum left there until read — each had sent its numbers
+  back to the CPU, and a network trained under `gpu[]` had never reached
+  the GPU.
+
+Each is a parity program in crow, in both modes (crow's parity 490–522).
+And the interpreter had asked the table for a row's written name by a scan
+inside a scan at every traced call, three fifths of a GPT's training time:
+the question reads an index now, as the table's other per-call questions
+do.
 
 ## Held to PyTorch
 

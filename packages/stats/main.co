@@ -1,11 +1,10 @@
---- `use math.stats`: the statistics, written in Crow (design rule 20) —
---- each one a formula over the math builtins; the t, F and chi-square
---- distributions over the sys layer's special functions (`betainc`,
---- `gammainc`), which stay validated kernels. Each one's row in the
---- builtin table (src/table.rs) is its contract: a list of numbers is a
---- tensor, a statistic of no values is NaN, two series a function pairs
---- up are one length, and anything else stops with the reason. The tests
---- are the module's own: `crow test src/modules/stats.co`.
+--- `use stats`: pie's statistics, written in Crow — each one a formula
+--- over crow's math builtins; the t, F and chi-square distributions over
+--- crow's validated special functions (`betainc`, `gammainc`, sys rows).
+--- A list of numbers is read as a tensor, a statistic of no values is NaN,
+--- two series a function pairs up are one length, and anything else stops
+--- with the reason. The tests below are the package's own: `crow test
+--- --packages stats` from pie's root.
 use math, sys
 
 --- `median[x]`: the middle value, or the mean of the two middle ones
@@ -167,8 +166,8 @@ fn chisq[observed, expected]
     p = 1.0 - gammainc[df / 2.0, chi2 / 2.0]
     return map[chi2 = chi2, p = p]
 
---- `anova[a, b, …]`: one-way ANOVA of two groups or more — `f` and its
---- `p` from the F-distribution
+--- `anova[groups]`: one-way ANOVA of a list of two groups or more — `f`
+--- and its `p` from the F-distribution
 fn anova[groups]
     k = len[groups]
     if k lt 2
@@ -223,7 +222,11 @@ fn _ks_p[lam]
 
 --- `kstest[data, dist]`: the Kolmogorov–Smirnov test of the data against
 --- `'normal'` (its own mean and spread) or `'uniform'` (0 to 1) — the
---- distance `d` and its `p`
+--- distance `d` and its `p`, Kolmogorov's asymptotic distribution at the
+--- distance scaled as Stephens scales it, (√n + 0.12 + 0.11/√n)·d
+--- (Numerical Recipes' `probks`): nearer the exact p for small samples
+--- than scipy's `method='asymp'`, which scales by √n, and the same as n
+--- grows
 fn kstest[data, dist]
     data_t = tensor[data]
     if dist ne 'normal' and dist ne 'uniform'

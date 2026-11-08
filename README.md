@@ -11,12 +11,12 @@ follows: PyTorch in float64, scikit-learn, scipy, networkx, faiss.
 
 | Package | What it is |
 |---|---|
-| [`packages/nn`](packages/nn) | activations, losses, layers (linear, convolutions, poolings, paddings, resamplings, RNN/LSTM/GRU, norms, embeddings), modules, initialisers, optimisers and their schedules — PyTorch's `torch.nn`, `torch.nn.functional`, `torch.nn.init` and `torch.optim` |
+| [`packages/nn`](packages/nn) | activations, losses, layers (linear, convolutions, poolings, paddings, resamplings, RNN/LSTM/GRU, attention, transformers, norms, embeddings, dropouts), modules, initialisers, optimisers and their schedules — PyTorch's `torch.nn`, `torch.nn.functional`, `torch.nn.init` and `torch.optim` |
 | [`packages/stats`](packages/stats) | descriptive statistics, correlation, tests and fits — scipy.stats |
 | [`packages/models`](packages/models/README.md) | the classical models, metrics, cross-validation — scikit-learn |
 | [`packages/optimize`](packages/optimize/README.md) | minimisers and roots — scipy.optimize |
 | [`packages/symbolic`](packages/symbolic/README.md) | symbolic regression — PySR |
-| [`packages/gpt`](packages/gpt/README.md) | nanoGPT, held to PyTorch |
+| [`packages/gpt`](packages/gpt/README.md) | nanoGPT's model and training on nn, its checkpoints by their names — held to nanoGPT |
 | [`packages/graph`](packages/graph/README.md) | graphs, paths, ranks — networkx |
 | [`packages/retrieval`](packages/retrieval/README.md) | TF-IDF and BM25 — scikit-learn, rank_bm25 |
 | [`packages/vectors`](packages/vectors/README.md) | an exact vector index — faiss |
@@ -54,6 +54,13 @@ float64 from `torch.manual_seed(0)`, end at the loss this prints to twelve
 digits. A loader (`nn.data`) hands out PyTorch's
 batches in PyTorch's order, and `nn.safetensors` saves and loads weights in
 the format PyTorch models are shared in.
+
+A program that writes `gpu[]` before it makes its model trains it on the
+GPU with nothing else changed, every tensor and every gradient staying
+there; the GPU computes in f32, so its answers agree with the CPU's to
+f32's digits. A perceptron 1024 wide on a batch of 512 trains about ten
+times faster there; a small model trains faster on the CPU
+([docs/pie-design.md](docs/pie-design.md), On the GPU).
 
 `./test.sh [crow]` runs every package's tests and examples in both modes.
 [docs/pie-design.md](docs/pie-design.md) says where the line with crow

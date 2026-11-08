@@ -1,0 +1,290 @@
+--- nn's attention, transformers and dropout held to PyTorch in float64
+--- (reference/attention_reference.py, torch 2.8). Each case of
+--- reference/expected/at_cases.csv is one of PyTorch's functions applied
+--- to fixed inputs (reference/data/at_inputs.csv), or one of its modules
+--- made from torch.manual_seed and run in training; its row is the numbers
+--- of the value, then the gradient of the sum of the value times fixed
+--- weights with respect to each input. A layer's row starts with the
+--- parameters torch drew, which pie draws from a torch generator seeded
+--- alike — the same numbers, exactly — and their gradient comes after the
+--- value's numbers. A layer with dropout draws its noise after its
+--- parameters, as a module made and then run draws (nn.dropout_noise).
+--- Every number agrees to 1e-12, relative above 1 and absolute below.
+use math, frame
+use nn
+use rng
+use functional as F
+use shapes
+
+--- the sizes of a case's inputs, up to four
+struct Dims [x1, x2, x3, x4]
+
+--- an input: its numbers, flat, and its sizes
+struct Input [values, dims]
+
+fn numbers[given]
+    out = []
+    for piece in split[given, ' ']
+        if piece ne ''
+            out = push[out, float[piece]]
+    return out
+
+fn sizes[given]
+    out = []
+    for d in json[given]
+        out = push[out, int[d]]
+    return out
+
+--- every input by name; `none`, an input a case does not take, one zero
+fn inputs[]
+    rows = frame.load['packages/nn/reference/data/at_inputs.csv']
+    out = map[]
+    for i in range[len[rows]]
+        out[str[rows.name[i]]] = Input[math.tensor[numbers[str[rows.values[i]]]], sizes[str[rows.dims[i]]]]
+    out['none'] = Input[math.zeros[1], [1]]
+    return out
+
+--- the weights a case's value is summed with: whole eighths, as the
+--- reference's
+fn weights_for[n]
+    vals = for k in range[n]
+        float[(k * 7) % 11 - 5] / 4.0 + 0.125
+    return tensor[vals]
+
+--- a function case's value, its numbers flat; the inputs come flat and are
+--- laid in their sizes here
+fn applied[name, d, x1, x2, x3, x4]
+    q = shapes.laid[x1, d.x1]
+    if name eq 'sdpa_causal'
+        return math.flatten[F.scaled_dot_product_attention[q, q * 0.5, q, is_causal = true]]
+    k = shapes.laid[x2, d.x2]
+    v = shapes.laid[x3, d.x3]
+    if name eq 'sdpa'
+        return math.flatten[F.scaled_dot_product_attention[q, k, v]]
+    if name eq 'sdpa_mask' or name eq 'sdpa_broadcast' or name eq 'sdpa_padded'
+        return math.flatten[F.scaled_dot_product_attention[q, k, v, attn_mask = shapes.laid[x4, d.x4]]]
+    if name eq 'sdpa_scale'
+        return math.flatten[F.scaled_dot_product_attention[q, k, v, scale = 0.3]]
+    halt['no function case `name`']
+
+fn probe[name, d, x1, x2, x3, x4, c]
+    return sum[applied[name, d, x1, x2, x3, x4] .* c]
+
+--- the layer of each layer case, made as the reference makes PyTorch's
+fn layer_of[name]
+    if name eq 'MHA_self' or name eq 'MHA_cross'
+        return nn.multihead_attention[8, 2]
+    if name eq 'MHA_heads'
+        return nn.multihead_attention[8, 4]
+    if name eq 'MHA_batch_first'
+        return nn.multihead_attention[8, 2, batch_first = true]
+    if name eq 'MHA_kv_dims'
+        return nn.multihead_attention[8, 2, kdim = 5, vdim = 3]
+    if name eq 'MHA_bias_kv_zero'
+        return nn.multihead_attention[8, 2, add_bias_kv = true, add_zero_attn = true]
+    if name eq 'MHA_unbatched'
+        return nn.multihead_attention[8, 2, bias = false]
+    if name eq 'Encoder_layer'
+        return nn.transformer_encoder_layer[8, 2, dim_feedforward = 16, dropout = 0.0]
+    if name eq 'Encoder_layer_prenorm'
+        return nn.transformer_encoder_layer[8, 2, dim_feedforward = 16, dropout = 0.0, activation = 'gelu', norm_first = true, batch_first = true]
+    if name eq 'Encoder_layer_masked'
+        return nn.transformer_encoder_layer[8, 4, dim_feedforward = 12, dropout = 0.0, bias = false]
+    if name eq 'Decoder_layer'
+        return nn.transformer_decoder_layer[8, 2, dim_feedforward = 16, dropout = 0.0]
+    if name eq 'Decoder_layer_prenorm'
+        return nn.transformer_decoder_layer[8, 2, dim_feedforward = 16, dropout = 0.0, norm_first = true, batch_first = true, activation = 'gelu']
+    if name eq 'Encoder'
+        return nn.transformer_encoder[nn.transformer_encoder_layer[8, 2, dim_feedforward = 16, dropout = 0.0], 2, norm = true]
+    if name eq 'Decoder'
+        return nn.transformer_decoder[nn.transformer_decoder_layer[8, 2, dim_feedforward = 16, dropout = 0.0], 2]
+    if name eq 'Transformer'
+        return nn.transformer[8, 2, num_encoder_layers = 2, num_decoder_layers = 1, dim_feedforward = 16, dropout = 0.0]
+    if name eq 'Transformer_batch_first'
+        return nn.transformer[8, 2, num_encoder_layers = 1, num_decoder_layers = 2, dim_feedforward = 12, dropout = 0.0, batch_first = true, norm_first = true]
+    if name eq 'Dropout'
+        return nn.dropout[0.3]
+    if name eq 'Dropout1d'
+        return nn.dropout1d[0.5]
+    if name eq 'Dropout2d'
+        return nn.dropout2d[0.4]
+    if name eq 'Dropout3d'
+        return nn.dropout3d[0.5]
+    if name eq 'Dropout_model'
+        return nn.sequential[[nn.linear[40, 6], nn.dropout[0.25], nn.relu[], nn.linear[6, 3], nn.dropout[0.5]]]
+    if name eq 'MHA_dropout'
+        return nn.multihead_attention[8, 2, dropout = 0.25]
+    if name eq 'MHA_dropout_sdpa'
+        return nn.multihead_attention[8, 2, dropout = 0.25, batch_first = true]
+    if name eq 'Encoder_layer_dropout'
+        return nn.transformer_encoder_layer[8, 2, dim_feedforward = 16, dropout = 0.2]
+    if name eq 'Decoder_layer_dropout'
+        return nn.transformer_decoder_layer[8, 2, dim_feedforward = 16, dropout = 0.3, batch_first = true]
+    if name eq 'Transformer_dropout'
+        return nn.transformer[8, 2, num_encoder_layers = 1, num_decoder_layers = 1, dim_feedforward = 12, dropout = 0.1]
+    if name eq 'LSTM_dropout'
+        return nn.lstm[3, 4, num_layers = 3, dropout = 0.5]
+    if name eq 'GRU_dropout_bidirectional'
+        return nn.gru[3, 4, num_layers = 2, dropout = 0.4, bidirectional = true, batch_first = true]
+    halt['no layer case `name`']
+
+--- an attention's value: its output, then its weights where it answers
+--- them
+fn attended[a]
+    return concat[math.flatten[a.output], math.flatten[a.weights]]
+
+--- a layer case's value, its numbers flat, run as the reference runs
+--- PyTorch's module, reading the noise drawn for it
+fn valued[name, layer, d, theta, x1, x2, x3, x4, noise]
+    a = shapes.laid[x1, d.x1]
+    b = shapes.laid[x2, d.x2]
+    if name eq 'MHA_self' or name eq 'MHA_unbatched'
+        return attended[nn.attend[layer, theta, a, a, a]]
+    if name eq 'MHA_heads'
+        return attended[nn.attend[layer, theta, a, a, a, attn_mask = b, average_attn_weights = false]]
+    if name eq 'MHA_batch_first'
+        return attended[nn.attend[layer, theta, a, a, a, need_weights = false]]
+    if name eq 'MHA_kv_dims'
+        return attended[nn.attend[layer, theta, a, b, shapes.laid[x3, d.x3], key_padding_mask = shapes.laid[x4, d.x4]]]
+    if name eq 'MHA_bias_kv_zero'
+        return attended[nn.attend[layer, theta, a, a, a, attn_mask = b]]
+    if name eq 'MHA_cross'
+        return attended[nn.attend[layer, theta, a, b, b, attn_mask = shapes.laid[x3, d.x3], need_weights = false]]
+    if name eq 'Encoder_layer' or name eq 'Encoder_layer_prenorm'
+        return math.flatten[nn.encode[layer, theta, a]]
+    if name eq 'Encoder_layer_masked'
+        return math.flatten[nn.encode[layer, theta, a, src_mask = b, src_key_padding_mask = shapes.laid[x3, d.x3]]]
+    if name eq 'Decoder_layer'
+        return math.flatten[nn.decode[layer, theta, a, b, tgt_mask = shapes.laid[x3, d.x3], memory_key_padding_mask = shapes.laid[x4, d.x4]]]
+    if name eq 'Decoder_layer_prenorm'
+        return math.flatten[nn.decode[layer, theta, a, b]]
+    if name eq 'Encoder'
+        return math.flatten[nn.encode[layer, theta, a, src_mask = b]]
+    if name eq 'Decoder'
+        return math.flatten[nn.decode[layer, theta, a, b, tgt_mask = shapes.laid[x3, d.x3]]]
+    if name eq 'Transformer'
+        return math.flatten[nn.transform[layer, theta, a, b, tgt_mask = shapes.laid[x3, d.x3]]]
+    if name eq 'Transformer_batch_first'
+        return math.flatten[nn.transform[layer, theta, a, b]]
+    if name eq 'MHA_dropout'
+        return attended[nn.attend[layer, theta, a, a, a, noise = noise]]
+    if name eq 'MHA_dropout_sdpa'
+        return attended[nn.attend[layer, theta, a, a, a, need_weights = false, noise = noise]]
+    if name eq 'Encoder_layer_dropout'
+        return math.flatten[nn.encode[layer, theta, a, src_mask = b, noise = noise]]
+    if name eq 'Decoder_layer_dropout'
+        return math.flatten[nn.decode[layer, theta, a, b, noise = noise]]
+    if name eq 'Transformer_dropout'
+        return math.flatten[nn.transform[layer, theta, a, b, noise = noise]]
+    if name eq 'LSTM_dropout' or name eq 'GRU_dropout_bidirectional'
+        return math.flatten[nn.recurrent[layer, theta, a, noise = noise].output]
+    return math.flatten[nn.forward[layer, theta, a, noise = noise]]
+
+fn layered[name, layer, d, theta, x1, x2, x3, x4, noise, c]
+    return sum[valued[name, layer, d, theta, x1, x2, x3, x4, noise] .* c]
+
+--- a case's inputs by the names its row lists
+fn named_inputs[listed, given]
+    out = []
+    for n in split[listed, ' ']
+        out = push[out, given[n]]
+    return out
+
+fn dims_of[ins]
+    return Dims[ins[0].dims, ins[1].dims, ins[2].dims, ins[3].dims]
+
+--- how many inputs a case takes: those not named `none`
+fn taken[listed]
+    k = 0
+    for n in split[listed, ' ']
+        if n ne 'none'
+            k = k + 1
+    return k
+
+--- a function case's row
+fn function_row[name, listed, given]
+    ins = named_inputs[listed, given]
+    d = dims_of[ins]
+    value = applied[name, d, ins[0].values, ins[1].values, ins[2].values, ins[3].values]
+    gs = grad[probe][name, d, ins[0].values, ins[1].values, ins[2].values, ins[3].values, weights_for[len[value]]]
+    row = value
+    for i in range[taken[listed]]
+        row = concat[row, math.flatten[gs[i]]]
+    return row
+
+--- a layer case's row: theta as pie draws it, the value, theta's gradient
+--- and each input's; the noise drawn after theta, from the same generator
+fn layer_row[name, listed, given, seeded]
+    layer = layer_of[name]
+    ins = named_inputs[listed, given]
+    d = dims_of[ins]
+    drawn = nn.parameters[layer, rng.manual_seed[seeded]]
+    theta = drawn.values
+    noise = nn.dropout_noise[layer, drawn.generator, shapes.laid[ins[0].values, d.x1], shapes.laid[ins[1].values, d.x2]].values
+    value = valued[name, layer, d, theta, ins[0].values, ins[1].values, ins[2].values, ins[3].values, noise]
+    gs = grad[layered][name, layer, d, theta, ins[0].values, ins[1].values, ins[2].values, ins[3].values, noise, weights_for[len[value]]]
+    row = concat[theta, value]
+    for i in range[taken[listed] + 1]
+        row = concat[row, math.flatten[gs[i]]]
+    return row
+
+--- the largest difference of two rows, relative where a number is above
+--- 1 and absolute below; a row of another length is apart by ∞
+fn apart[got, want]
+    if len[got] ne len[want]
+        return inf
+    return max[abs[got - want] ./ (abs[want] + 1.0)]
+
+--- the cases whose rows are not the reference's, each with its distance;
+--- a layer whose parameters pie draws are not torch's numbers exactly is
+--- named with them
+fn disagreements[]
+    given = inputs[]
+    cases = frame.load['packages/nn/reference/expected/at_cases.csv']
+    out = []
+    for i in range[len[cases]]
+        name = str[cases.case[i]]
+        listed = str[cases.inputs[i]]
+        seeded = int[cases.seed[i]]
+        want = math.tensor[numbers[str[cases.row[i]]]]
+        got = math.zeros[0]
+        if seeded lt 0
+            got = function_row[name, listed, given]
+        else
+            got = layer_row[name, listed, given, seeded]
+            n = nn.size[layer_of[name]]
+            if not (slice[got, 0, n] eq slice[want, 0, n])
+                out = push[out, '`name` draws other parameters']
+        gap = apart[got, want]
+        if gap gt float[cases.within[i]]
+            out = push[out, '`name` `gap`']
+    return out
+
+test nn_attention_and_transformers_agree_with_pytorch[]
+    disagreements[] eq []
+
+--- a mask that is the causal triangle is read as causal by an encoder (no
+--- gradient reaches the mask), and as a mask by its layer alone
+test an_encoder_reads_the_causal_triangle_as_causal[]
+    layer = nn.transformer_encoder_layer[4, 2, dim_feedforward = 6, dropout = 0.0]
+    model = nn.transformer_encoder[layer, 1]
+    theta = nn.parameters[model, rng.manual_seed[3]].values
+    x = math.reshape[math.tensor[range[24]] * 0.1, 3, 2, 4]
+    causal = F.causal_mask[3, 3]
+    math.flatten[nn.encode[model, theta, x, src_mask = causal]] eq math.flatten[nn.encode[model, theta, x, src_mask = causal, is_causal = true]]
+    once = nn.encode[layer, slice[theta, 0, nn.size[layer]], x, src_mask = causal]
+    max[abs[math.flatten[once] - math.flatten[nn.encode[model, theta, x, src_mask = causal]]]] lt 0.000000000001
+
+--- in training, a dropout reads its draws; nn.dropout_noise draws as many as
+--- the forward pass reads
+test a_dropout_in_training_reads_the_noise_drawn_for_it[]
+    model = nn.sequential[[nn.linear[4, 3], nn.dropout[0.5], nn.linear[3, 2], nn.dropout[0.25]]]
+    p = nn.parameters[model, rng.manual_seed[7]]
+    x = math.ones[5, 4]
+    noise = nn.dropout_noise[model, p.generator, x]
+    len[noise.values] eq 25
+    off = nn.forward[nn.eval[model], p.values, x]
+    on = nn.forward[model, p.values, x, noise = noise.values]
+    off.shape eq [5, 2]
+    on.shape eq [5, 2]
+    len[nn.dropout_noise[nn.eval[model], p.generator, x].values] eq 0

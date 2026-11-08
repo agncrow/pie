@@ -1,0 +1,6 @@
+--- nn's attention, transformers and dropout held to PyTorch in both
+--- modes (held_attention.co's check): every case's value and gradients, a
+--- layer's parameters and its training noise drawn as torch draws them,
+--- compiled as interpreted
+use nn.held_attention
+log[held_attention.disagreements[]]
