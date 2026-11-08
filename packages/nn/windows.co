@@ -1,0 +1,439 @@
+--- `use nn.windows`: the positions a convolution, a pooling, a padding
+--- or a fold reads, as tensors of whole numbers a gather takes
+--- (`t[positions]`), in the order PyTorch's kernels read them. A layer
+--- over windows is then a gather and a matrix product or a reduction,
+--- which `grad` differentiates as it does any gather: the gradient goes
+--- back to the positions read, added where one is read twice. A position
+--- that reads no number of the input — padding, or past a window's end — is
+--- the input's length: the one number a layer appends after the input (0,
+--- −∞, a constant).
+---
+--- A tensor `[n, c, s₁, …, s_d]` is read as n·c planes of the spatial
+--- sizes `[s₁, …, s_d]`, row-major; a window's taps are the kernel's
+--- positions, row-major, and the windows are the output's positions.
+use math as m
+use shapes
+
+--- how far a window reaches before and after the input along each axis
+struct Pads [low, high]
+
+--- adaptive windows: the positions each reads (`table`, as `table`
+--- answers) and, for each axis, the windows' lengths along it
+struct Adaptive [table, lengths]
+
+--- a batch over spatial axes, read off its sizes: how many items (1 where
+--- it has no batch axis), its channels, its spatial sizes, and whether it
+--- has the batch axis
+struct Batch [n, channels, sizes, batched]
+
+--- the planes of a tensor over spatial axes: how many (the product of the
+--- axes before them), their sizes, and the axes before them
+struct Planes [count, sizes, lead]
+
+--- batch_of[dims, d, what]: a batch `[n, c, …]` or an item `[c, …]` over d
+--- spatial axes, read off its sizes
+fn batch_of[dims, d, what]
+    if len[dims] eq d + 2
+        return Batch[dims[0], dims[1], slice[dims, 2, len[dims]], true]
+    if len[dims] eq d + 1
+        return Batch[1, dims[0], slice[dims, 1, len[dims]], false]
+    halt['`what`: x takes `d + 1` or `d + 2` axes ([n,] channels, then `d` spatial), and has `len[dims]`']
+
+--- batch_dims[given, channels, at]: the sizes of a batch's answer of
+--- `channels` channels over spatial sizes `at`
+fn batch_dims[given, channels, at]
+    out = concat[[channels], at]
+    if given.batched
+        out = concat[[given.n], out]
+    return out
+
+--- planes_of[dims, d, what]: the planes over d spatial axes of a tensor
+--- of d + 1 or d + 2 axes
+fn planes_of[dims, d, what]
+    if len[dims] lt d + 1 or len[dims] gt d + 2
+        halt['`what`: x takes `d + 1` or `d + 2` axes ([n,] channels, then `d` spatial), and has `len[dims]`']
+    k = len[dims] - d
+    lead = slice[dims, 0, k]
+    return Planes[shapes.product[lead], slice[dims, k, len[dims]], lead]
+
+--- swapped[a, b, c]: the positions that lay `[a, b, c]` as `[b, a, c]`
+fn swapped[a, b, c]
+    return m.flatten[m.reshape[_upto[b] * float[c], b, 1, 1] + m.reshape[_upto[a] * float[b * c], 1, a, 1] + m.reshape[_upto[c], 1, 1, c]]
+
+--- each[given, d, what]: an option given as an int or a list of ints, one
+--- per spatial axis (PyTorch's int or tuple), as d ints
+fn each[given, d, what]
+    out = _ints_in[str[given], what]
+    if len[out] eq 1 and d gt 1
+        one = out[0]
+        out = []
+        for k in range[d]
+            out = push[out, one]
+    if len[out] ne d
+        halt['`what` takes one int or `d`, one per spatial axis, and was given `str[given]`']
+    return out
+
+--- listed[given, what]: the whole numbers of an int or a list of ints
+fn listed[given, what]
+    return _ints_in[str[given], what]
+
+--- the whole numbers the text of an int or a list of ints holds
+fn _ints_in[given, what]
+    digits = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+    out = []
+    value = 0
+    sign = 1
+    seen = false
+    for ch in split[given, '']
+        if ch eq ',' or ch eq ']'
+            if seen
+                out = push[out, sign * value]
+            value = 0
+            sign = 1
+            seen = false
+        else
+            if ch eq '-'
+                sign = -1
+            else
+                found = -1
+                for i in range[10]
+                    if digits[i] eq ch
+                        found = i
+                if found gte 0
+                    value = min[value * 10 + found, 4294967296]
+                    seen = true
+                else
+                    if not (ch eq '[' or ch eq ' ')
+                        halt['`what` takes an int or a list of ints, and was given `given`']
+    if seen
+        out = push[out, sign * value]
+    return out
+
+--- padding[given, d, kernel, dilation, stride, what]: a padding given as
+--- PyTorch's — an int or a list of ints, the same before and after each
+--- axis, 'valid' (none) or 'same' (the output the input's size: in all
+--- dilation·(k − 1) along an axis, half of it before, the rest after;
+--- for a stride of 1 only)
+fn padding[given, d, kernel, dilation, stride, what]
+    word = str[given]
+    if word eq 'valid'
+        zero = each[0, d, what]
+        return Pads[zero, zero]
+    if word eq 'same'
+        for s in stride
+            if s ne 1
+                halt['`what`: padding=\'same\' is not supported for strided convolutions']
+        low = []
+        high = []
+        for j in range[d]
+            total = dilation[j] * (kernel[j] - 1)
+            low = push[low, total / 2]
+            high = push[high, total - total / 2]
+        return Pads[low, high]
+    p = each[given, d, what]
+    for x in p
+        if x lt 0
+            halt['`what`: negative padding is not supported']
+    return Pads[p, p]
+
+--- outs[sizes, kernel, stride, pads, dilation, what]: the output's sizes
+--- of windows over `sizes`: ⌊(s + low + high − dilation·(k − 1) − 1) /
+--- stride⌋ + 1 along each axis
+fn outs[sizes, kernel, stride, pads, dilation, what]
+    out = []
+    for j in range[len[sizes]]
+        reach = sizes[j] + pads.low[j] + pads.high[j] - dilation[j] * (kernel[j] - 1) - 1
+        if reach lt 0
+            halt['`what`: the kernel (`kernel[j]` taps, dilated `dilation[j]`) is larger than the input padded (`sizes[j] + pads.low[j] + pads.high[j]`) along axis `j`']
+        out = push[out, reach / stride[j] + 1]
+    return out
+
+--- table[sizes, kernel, stride, low, dilation, at]: for each window (the
+--- output's positions of sizes `at`) and each tap of the kernel, the
+--- position in a plane of `sizes` the tap reads — o·stride − low +
+--- k·dilation along each axis — or −1 where that is outside the plane: a
+--- matrix `[windows, taps]`
+fn table[sizes, kernel, stride, low, dilation, at]
+    d = len[sizes]
+    taps = shapes.product[kernel]
+    count = shapes.product[at]
+    kc = _coords[kernel]
+    oc = _coords[at]
+    out = []
+    for o in range[count]
+        for k in range[taps]
+            pos = 0
+            inside = true
+            for j in range[d]
+                i = oc[o * d + j] * stride[j] - low[j] + kc[k * d + j] * dilation[j]
+                if i lt 0 or i gte sizes[j]
+                    inside = false
+                pos = pos * sizes[j] + i
+            if inside
+                out = push[out, float[pos]]
+            else
+                out = push[out, -1.0]
+    return m.reshape[m.tensor[out], count, taps]
+
+--- the coordinates of each position of a box of sizes `dims`, row-major,
+--- one after another: d numbers a position
+fn _coords[dims]
+    d = len[dims]
+    out = []
+    for p in range[shapes.product[dims]]
+        rest = p
+        here = []
+        for j in range[d]
+            a = d - 1 - j
+            here = push[here, rest % dims[a]]
+            rest = rest / dims[a]
+        for j in range[d]
+            out = push[out, here[d - 1 - j]]
+    return out
+
+--- the numbers 0 to n − 1 as a tensor
+fn _upto[n]
+    return m.tensor[range[n]]
+
+--- a tensor of positions `[rows, cols]` made of a column of row starts and
+--- a row of column offsets: start[r] + offset[c]
+fn _grid[firsts, offsets]
+    return m.reshape[firsts, len[firsts], 1] + m.reshape[offsets, 1, len[offsets]]
+
+--- padding read as `none`, the position after the input's numbers
+fn _or_none[positions, none]
+    return where[positions lt 0.0, positions * 0.0 + float[none], positions]
+
+--- columns[t, n, channels, plane, first, count]: the positions a
+--- convolution's matrix product reads (im2col), `[n·windows, count·taps]`:
+--- row (i, o) for each item i and window o, column (c, k) for each of
+--- `count` channels from `first` and each tap k — the number tap k of
+--- window o reads in channel first + c of item i, of a batch laid
+--- `[n, channels, plane]`; padding reads position n·channels·plane
+fn columns[t, n, channels, plane, first, count]
+    windows = t.shape[0]
+    taps = t.shape[1]
+    tap = []
+    lift = []
+    for c in range[count]
+        for k in range[taps]
+            tap = push[tap, k]
+            lift = push[lift, (first + c) * plane]
+    wide = m.reshape[m.flatten[t][_grid[_upto[windows] * float[taps], m.tensor[tap]]], windows, count * taps]
+    each_row = m.flatten[_grid[m.zeros[n], _upto[windows]]]
+    tall = m.reshape[m.flatten[wide][_grid[each_row * float[count * taps], _upto[count * taps]]], n * windows, count * taps]
+    item = m.flatten[_grid[_upto[n] * float[channels * plane], m.zeros[windows]]]
+    return _or_none[where[tall lt 0.0, tall, tall + _grid[item, m.tensor[lift]]], n * channels * plane]
+
+--- pooled[t, planes, plane]: the positions a pooling reads,
+--- `[planes·windows, taps]`: row (q, o) for each plane q and window o, the
+--- number each tap reads; padding reads position planes·plane
+fn pooled[t, planes, plane]
+    windows = t.shape[0]
+    taps = t.shape[1]
+    each_row = m.flatten[_grid[m.zeros[planes], _upto[windows]]]
+    tall = m.reshape[m.flatten[t][_grid[each_row * float[taps], _upto[taps]]], planes * windows, taps]
+    start = m.flatten[_grid[_upto[planes] * float[plane], m.zeros[windows]]]
+    return _or_none[where[tall lt 0.0, tall, tall + m.reshape[start, planes * windows, 1]], planes * plane]
+
+--- channels_first[n, windows, channels]: the positions that lay a matrix
+--- `[n·windows, channels]` (a row per item and window) as `[n, channels,
+--- windows]`
+fn channels_first[n, windows, channels]
+    inner = m.flatten[_grid[_upto[channels], _upto[windows] * float[channels]]]
+    return m.flatten[_grid[_upto[n] * float[windows * channels], inner]]
+
+--- channels_last[n, channels, windows, first, count]: the positions that
+--- read `count` channels from `first` of a batch `[n, channels, windows]`
+--- as a matrix `[n·windows, count]`, a row per item and window
+fn channels_last[n, channels, windows, first, count]
+    inner = m.flatten[_grid[_upto[windows], (_upto[count] + float[first]) * float[windows]]]
+    rows = _grid[_upto[n] * float[channels * windows], inner]
+    return m.reshape[m.flatten[rows], n * windows, count]
+
+--- folded[t, plane, n, channels, a, b, gl, gk, none]: the positions a fold
+--- (col2im) adds up, `[n·channels·plane, most]`: row (i, c, p) for each
+--- item, channel and position p of the plane folded into, the numbers
+--- folded onto p — each window o and tap k with t[o, k] = p, by the tap's
+--- order, as PyTorch's col2im adds them — at position i·a + c·b + o·gl +
+--- k·gk of what is folded; `none` past them
+fn folded[t, plane, n, channels, a, b, gl, gk, none]
+    windows = t.shape[0]
+    taps = t.shape[1]
+    flat = m.flatten[t]
+    counts = []
+    for p in range[plane]
+        counts = push[counts, 0]
+    for o in range[windows]
+        for k in range[taps]
+            q = int[flat[o * taps + k]]
+            if q gte 0
+                counts[q] = counts[q] + 1
+    most = 1
+    for c in counts
+        most = max[most, c]
+    slots = []
+    for i in range[plane * most]
+        slots = push[slots, -1.0]
+    filled = []
+    for p in range[plane]
+        filled = push[filled, 0]
+    for k in range[taps]
+        for o in range[windows]
+            q = int[flat[o * taps + k]]
+            if q gte 0
+                slots[q * most + filled[q]] = float[o * gl + k * gk]
+                filled[q] = filled[q] + 1
+    rows = m.flatten[_grid[m.zeros[n * channels], _upto[plane]]]
+    tall = m.reshape[m.tensor[slots][_grid[rows * float[most], _upto[most]]], n * channels * plane, most]
+    start = m.flatten[_grid[m.flatten[_grid[_upto[n] * float[a], _upto[channels] * float[b]]], m.zeros[plane]]]
+    return _or_none[where[tall lt 0.0, tall, tall + m.reshape[start, n * channels * plane, 1]], none]
+
+--- padded[dims, pad, mode, what]: the positions F.pad reads, laid flat:
+--- pad names the numbers added before and after each axis from the last
+--- (PyTorch's order: the last axis's first), a negative one cutting;
+--- 'constant' reads none where it adds (the input's length), 'reflect'
+--- mirrors about the edge, 'replicate' repeats it and 'circular' wraps
+fn padded[dims, pad, mode, what]
+    rank = len[dims]
+    if len[pad] % 2 ne 0 or len[pad] / 2 gt rank
+        halt['`what`: padding length must be divisible by 2 and at most twice the input\'s `rank` axes']
+    if mode ne 'constant' and mode ne 'reflect' and mode ne 'replicate' and mode ne 'circular'
+        halt['`what`: mode `mode` is none of constant, reflect, replicate and circular']
+    gone = -1000000000000000.0
+    at = m.zeros[1]
+    total = shapes.product[dims]
+    for a in range[rank]
+        s = dims[a]
+        lo = 0
+        hi = 0
+        back = rank - 1 - a
+        if back lt len[pad] / 2
+            lo = pad[2 * back]
+            hi = pad[2 * back + 1]
+        if mode ne 'constant'
+            if lo lt 0 or hi lt 0
+                halt['`what`: mode `mode` takes no negative padding']
+            if mode eq 'reflect' and (lo gte s or hi gte s)
+                halt['`what`: padding size should be less than the corresponding input dimension, but got padding (`lo`, `hi`) at dimension `a` of input `str[dims]`']
+            if mode eq 'circular' and (lo gt s or hi gt s)
+                halt['`what`: padding value causes wrapping around more than once']
+        size = s + lo + hi
+        if size lt 0
+            halt['`what`: the padding leaves axis `a` of `s` numbers with `size`']
+        line = []
+        for c in range[size]
+            i = c - lo
+            if mode eq 'constant'
+                if i lt 0 or i gte s
+                    line = push[line, gone]
+                else
+                    line = push[line, float[i]]
+            else
+                if mode eq 'reflect'
+                    if i lt 0
+                        i = -i
+                    if i gte s
+                        i = 2 * (s - 1) - i
+                if mode eq 'replicate'
+                    i = max[0, min[i, s - 1]]
+                if mode eq 'circular'
+                    i = ((i % s) + s) % s
+                line = push[line, float[i]]
+        at = m.flatten[_grid[at * float[s], m.tensor[line]]]
+    return _or_none[at, total]
+
+--- padded_dims[dims, pad]: the sizes F.pad answers
+fn padded_dims[dims, pad]
+    rank = len[dims]
+    out = []
+    for a in range[rank]
+        back = rank - 1 - a
+        size = dims[a]
+        if back lt len[pad] / 2
+            size = size + pad[2 * back] + pad[2 * back + 1]
+        out = push[out, size]
+    return out
+
+--- channel_of_rows[n, channels]: the channel of each row of a matrix
+--- `[n·channels, …]`, a row per item and channel
+fn channel_of_rows[n, channels]
+    return m.flatten[_grid[m.zeros[n], _upto[channels]]]
+
+--- tiled[v, times]: v's numbers `times` times over, one after another
+fn tiled[v, times]
+    return m.flatten[_grid[m.zeros[times], v]]
+
+--- divisors[sizes, kernel, stride, pads, at, include, override]: what
+--- average pooling divides each window's sum by, as PyTorch's kernel
+--- does: the window's size within the input padded (where include), or
+--- within the input alone, or the override where it is above 0
+fn divisors[sizes, kernel, stride, pads, at, include, override]
+    d = len[sizes]
+    oc = _coords[at]
+    out = []
+    for o in range[shapes.product[at]]
+        whole = 1
+        inside = 1
+        for j in range[d]
+            start = oc[o * d + j] * stride[j] - pads[j]
+            end = min[start + kernel[j], sizes[j] + pads[j]]
+            whole = whole * (end - start)
+            inside = inside * (min[end, sizes[j]] - max[start, 0])
+        n = whole
+        if not include
+            n = inside
+        if override gt 0
+            n = override
+        out = push[out, float[n]]
+    return m.tensor[out]
+
+--- adaptive[sizes, at]: the windows adaptive pooling reads, `at` of them
+--- along each axis: window i of an axis of s numbers from ⌊i·s/o⌋ to
+--- ⌈(i + 1)·s/o⌉ (PyTorch's start_index and end_index), the taps past a
+--- window's end reading none
+fn adaptive[sizes, at]
+    d = len[sizes]
+    firsts = []
+    lasts = []
+    longest = []
+    for j in range[d]
+        most = 0
+        for o in range[at[j]]
+            a = (o * sizes[j]) / at[j]
+            b = 1 + ((o + 1) * sizes[j] - 1) / at[j]
+            firsts = push[firsts, a]
+            lasts = push[lasts, b]
+            most = max[most, b - a]
+        longest = push[longest, most]
+    count = shapes.product[at]
+    taps = shapes.product[longest]
+    oc = _coords[at]
+    kc = _coords[longest]
+    out = []
+    for o in range[count]
+        for k in range[taps]
+            pos = 0
+            inside = true
+            base = 0
+            for j in range[d]
+                at_j = oc[o * d + j]
+                i = firsts[base + at_j] + kc[k * d + j]
+                if i gte lasts[base + at_j]
+                    inside = false
+                pos = pos * sizes[j] + i
+                base = base + at[j]
+            if inside
+                out = push[out, float[pos]]
+            else
+                out = push[out, -1.0]
+    lengths = []
+    base = 0
+    for j in range[d]
+        line = []
+        for o in range[count]
+            at_j = oc[o * d + j]
+            line = push[line, float[lasts[base + at_j] - firsts[base + at_j]]]
+        lengths = push[lengths, m.tensor[line]]
+        base = base + at[j]
+    return Adaptive[m.reshape[m.tensor[out], count, taps], lengths]

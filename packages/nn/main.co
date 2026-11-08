@@ -14,7 +14,7 @@
 --- PyTorch's forward pass moves them in training. The functions a model is
 --- written in are `nn.functional`'s.
 use math as m
-use functional, shapes, rng
+use functional, shapes, rng, windows
 
 --- a layer: its form (`linear`, `relu`, `sequential`, …), its name in its
 --- parent, where its parameters begin in theta, how many are its own and
@@ -26,6 +26,11 @@ struct Layer [form, name, at, own, size, ints, floats, word, flags, training, he
 --- a parameter: its name in the state (`0.weight`), where its numbers
 --- begin in theta, and its sizes
 struct Named [path, at, dims]
+
+--- a recurrent layer's answer (`nn.recurrent`): its output at every step,
+--- its last hidden state and, for an LSTM, its last cell state (no
+--- numbers otherwise)
+struct Recurrent [output, h, c]
 
 --- a list of ints and a list of floats, whatever list or vector they are
 --- given as (a list of whole numbers written down is a vector of them)
@@ -134,6 +139,337 @@ fn identity[]
 --- flatten[start, end]: axes start to end joined into one (nn.Flatten)
 fn flatten[start = 1, end = -1]
     return _plain['flatten', [start, end], [0.0], '']
+
+--- unflatten[dim, sizes]: axis dim laid as `sizes` (nn.Unflatten)
+fn unflatten[dim, sizes]
+    return _plain['unflatten', concat[[dim], _sizes[sizes]], [0.0], '']
+
+--- the layers over windows ------------------------------------------------------
+
+--- conv1d[ins, outs, kernel_size, stride, padding, dilation, groups, bias,
+--- padding_mode]: a convolution over one spatial axis (nn.Conv1d), its
+--- weight `[outs, ins / groups, k]` drawn as PyTorch's — kaiming_uniform
+--- with a = √5 over ins / groups · k inputs — and its bias within
+--- ±1/√(ins / groups · k); padding is an int, one per axis, 'valid' or
+--- 'same', and padding_mode 'zeros', 'reflect', 'replicate' or 'circular'
+--- (the input padded so, then convolved). conv2d and conv3d alike
+fn conv1d[ins, outs, kernel_size, stride = 1, padding = 0, dilation = 1, groups = 1, bias = true, padding_mode = 'zeros']
+    return _conv_layer[1, ins, outs, kernel_size, stride, padding, dilation, groups, bias, padding_mode]
+
+fn conv2d[ins, outs, kernel_size, stride = 1, padding = 0, dilation = 1, groups = 1, bias = true, padding_mode = 'zeros']
+    return _conv_layer[2, ins, outs, kernel_size, stride, padding, dilation, groups, bias, padding_mode]
+
+fn conv3d[ins, outs, kernel_size, stride = 1, padding = 0, dilation = 1, groups = 1, bias = true, padding_mode = 'zeros']
+    return _conv_layer[3, ins, outs, kernel_size, stride, padding, dilation, groups, bias, padding_mode]
+
+fn _conv_layer[d, ins, outs, kernel_size, stride, padding, dilation, groups, bias, padding_mode]
+    if groups lt 1 or ins % groups ne 0
+        halt['in_channels must be divisible by groups']
+    if outs % groups ne 0
+        halt['out_channels must be divisible by groups']
+    if not (padding_mode in ['zeros', 'reflect', 'replicate', 'circular'])
+        halt['padding_mode must be one of zeros, reflect, replicate and circular, but got padding_mode=\'`padding_mode`\'']
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = windows.each[stride, d, 'stride']
+    dl = windows.each[dilation, d, 'dilation']
+    pads = windows.padding[padding, d, kernel, dl, st, 'conv']
+    own = outs * (ins / groups) * shapes.product[kernel]
+    if bias
+        own = own + outs
+    ints = concat[concat[concat[[d, ins, outs, groups], kernel], concat[st, pads.low]], concat[pads.high, dl]]
+    return _leaf['conv', own, ints, [0.0], padding_mode, [bias]]
+
+--- conv_transpose1d[ins, outs, kernel_size, stride, padding,
+--- output_padding, groups, bias, dilation]: a transposed convolution
+--- (nn.ConvTranspose1d), its weight `[ins, outs / groups, k]` drawn as
+--- PyTorch's — kaiming_uniform with a = √5 over outs / groups · k inputs,
+--- the bias within ±1/√that; conv_transpose2d and conv_transpose3d alike
+fn conv_transpose1d[ins, outs, kernel_size, stride = 1, padding = 0, output_padding = 0, groups = 1, bias = true, dilation = 1]
+    return _transposed_layer[1, ins, outs, kernel_size, stride, padding, output_padding, groups, bias, dilation]
+
+fn conv_transpose2d[ins, outs, kernel_size, stride = 1, padding = 0, output_padding = 0, groups = 1, bias = true, dilation = 1]
+    return _transposed_layer[2, ins, outs, kernel_size, stride, padding, output_padding, groups, bias, dilation]
+
+fn conv_transpose3d[ins, outs, kernel_size, stride = 1, padding = 0, output_padding = 0, groups = 1, bias = true, dilation = 1]
+    return _transposed_layer[3, ins, outs, kernel_size, stride, padding, output_padding, groups, bias, dilation]
+
+fn _transposed_layer[d, ins, outs, kernel_size, stride, padding, output_padding, groups, bias, dilation]
+    if groups lt 1 or ins % groups ne 0
+        halt['in_channels must be divisible by groups']
+    if outs % groups ne 0
+        halt['out_channels must be divisible by groups']
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = windows.each[stride, d, 'stride']
+    p = windows.each[padding, d, 'padding']
+    op = windows.each[output_padding, d, 'output_padding']
+    dl = windows.each[dilation, d, 'dilation']
+    own = ins * (outs / groups) * shapes.product[kernel]
+    if bias
+        own = own + outs
+    ints = concat[concat[concat[[d, ins, outs, groups], kernel], concat[st, p]], concat[op, dl]]
+    return _leaf['conv_transpose', own, ints, [0.0], 'zeros', [bias]]
+
+--- a layer's spatial options, k of them in turn after its four numbers
+--- (the axes, and three more)
+fn _part[layer, k]
+    d = layer.ints[0]
+    return slice[layer.ints, 4 + k * d, 4 + (k + 1) * d]
+
+--- max_pool1d[kernel_size, stride, padding, dilation, ceil_mode]: the
+--- largest number of each window (nn.MaxPool1d; stride 0 is the
+--- kernel's); max_pool2d and max_pool3d alike
+fn max_pool1d[kernel_size, stride = 0, padding = 0, dilation = 1, ceil_mode = false]
+    return _max_pool_layer[1, kernel_size, stride, padding, dilation, ceil_mode]
+
+fn max_pool2d[kernel_size, stride = 0, padding = 0, dilation = 1, ceil_mode = false]
+    return _max_pool_layer[2, kernel_size, stride, padding, dilation, ceil_mode]
+
+fn max_pool3d[kernel_size, stride = 0, padding = 0, dilation = 1, ceil_mode = false]
+    return _max_pool_layer[3, kernel_size, stride, padding, dilation, ceil_mode]
+
+fn _max_pool_layer[d, kernel_size, stride, padding, dilation, ceil_mode]
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = functional.pool_stride[windows.each[stride, d, 'stride'], kernel]
+    ints = concat[concat[[d, 0, 0, 0], kernel], concat[concat[st, windows.each[padding, d, 'padding']], windows.each[dilation, d, 'dilation']]]
+    return _leaf['max_pool', 0, ints, [0.0], '', [ceil_mode]]
+
+--- avg_pool1d[kernel_size, stride, padding, ceil_mode,
+--- count_include_pad]: the mean of each window (nn.AvgPool1d);
+--- avg_pool2d and avg_pool3d alike, with divisor_override
+fn avg_pool1d[kernel_size, stride = 0, padding = 0, ceil_mode = false, count_include_pad = true]
+    return _avg_pool_layer[1, kernel_size, stride, padding, ceil_mode, count_include_pad, 0]
+
+fn avg_pool2d[kernel_size, stride = 0, padding = 0, ceil_mode = false, count_include_pad = true, divisor_override = 0]
+    return _avg_pool_layer[2, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override]
+
+fn avg_pool3d[kernel_size, stride = 0, padding = 0, ceil_mode = false, count_include_pad = true, divisor_override = 0]
+    return _avg_pool_layer[3, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override]
+
+fn _avg_pool_layer[d, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override]
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = functional.pool_stride[windows.each[stride, d, 'stride'], kernel]
+    ints = concat[concat[[d, divisor_override, 0, 0], kernel], concat[st, windows.each[padding, d, 'padding']]]
+    return _leaf['avg_pool', 0, ints, [0.0], '', [ceil_mode, count_include_pad]]
+
+--- lp_pool1d[norm_type, kernel_size, stride, ceil_mode]: the p-norm of
+--- each window (nn.LPPool1d); lp_pool2d and lp_pool3d alike
+fn lp_pool1d[norm_type, kernel_size, stride = 0, ceil_mode = false]
+    return _lp_pool_layer[1, norm_type, kernel_size, stride, ceil_mode]
+
+fn lp_pool2d[norm_type, kernel_size, stride = 0, ceil_mode = false]
+    return _lp_pool_layer[2, norm_type, kernel_size, stride, ceil_mode]
+
+fn lp_pool3d[norm_type, kernel_size, stride = 0, ceil_mode = false]
+    return _lp_pool_layer[3, norm_type, kernel_size, stride, ceil_mode]
+
+fn _lp_pool_layer[d, norm_type, kernel_size, stride, ceil_mode]
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = functional.pool_stride[windows.each[stride, d, 'stride'], kernel]
+    return _leaf['lp_pool', 0, concat[concat[[d, 0, 0, 0], kernel], st], [float[norm_type]], '', [ceil_mode]]
+
+--- adaptive_avg_pool1d[output_size]: each plane in output_size windows,
+--- as even as whole numbers allow, and each window's mean
+--- (nn.AdaptiveAvgPool1d); 2d and 3d alike, and the adaptive_max_pool
+--- layers each window's largest number
+fn adaptive_avg_pool1d[output_size]
+    return _leaf['adaptive_avg_pool', 0, concat[[1, 0, 0, 0], windows.each[output_size, 1, 'output_size']], [0.0], '', [false]]
+
+fn adaptive_avg_pool2d[output_size]
+    return _leaf['adaptive_avg_pool', 0, concat[[2, 0, 0, 0], windows.each[output_size, 2, 'output_size']], [0.0], '', [false]]
+
+fn adaptive_avg_pool3d[output_size]
+    return _leaf['adaptive_avg_pool', 0, concat[[3, 0, 0, 0], windows.each[output_size, 3, 'output_size']], [0.0], '', [false]]
+
+fn adaptive_max_pool1d[output_size]
+    return _leaf['adaptive_max_pool', 0, concat[[1, 0, 0, 0], windows.each[output_size, 1, 'output_size']], [0.0], '', [false]]
+
+fn adaptive_max_pool2d[output_size]
+    return _leaf['adaptive_max_pool', 0, concat[[2, 0, 0, 0], windows.each[output_size, 2, 'output_size']], [0.0], '', [false]]
+
+fn adaptive_max_pool3d[output_size]
+    return _leaf['adaptive_max_pool', 0, concat[[3, 0, 0, 0], windows.each[output_size, 3, 'output_size']], [0.0], '', [false]]
+
+--- zero_pad1d[padding]: zeros added before and after the last axis
+--- (nn.ZeroPad1d): padding one int for both sides or [before, after];
+--- the 2d and 3d forms the last two and three axes, PyTorch's order
+--- (left, right, top, bottom, front, back). constant_pad adds `value`,
+--- reflection_pad mirrors, replication_pad repeats the edge and
+--- circular_pad wraps around
+fn zero_pad1d[padding]
+    return _pad_layer[1, padding, 'constant', 0.0]
+
+fn zero_pad2d[padding]
+    return _pad_layer[2, padding, 'constant', 0.0]
+
+fn zero_pad3d[padding]
+    return _pad_layer[3, padding, 'constant', 0.0]
+
+fn constant_pad1d[padding, value]
+    return _pad_layer[1, padding, 'constant', float[value]]
+
+fn constant_pad2d[padding, value]
+    return _pad_layer[2, padding, 'constant', float[value]]
+
+fn constant_pad3d[padding, value]
+    return _pad_layer[3, padding, 'constant', float[value]]
+
+fn reflection_pad1d[padding]
+    return _pad_layer[1, padding, 'reflect', 0.0]
+
+fn reflection_pad2d[padding]
+    return _pad_layer[2, padding, 'reflect', 0.0]
+
+fn reflection_pad3d[padding]
+    return _pad_layer[3, padding, 'reflect', 0.0]
+
+fn replication_pad1d[padding]
+    return _pad_layer[1, padding, 'replicate', 0.0]
+
+fn replication_pad2d[padding]
+    return _pad_layer[2, padding, 'replicate', 0.0]
+
+fn replication_pad3d[padding]
+    return _pad_layer[3, padding, 'replicate', 0.0]
+
+fn circular_pad1d[padding]
+    return _pad_layer[1, padding, 'circular', 0.0]
+
+fn circular_pad2d[padding]
+    return _pad_layer[2, padding, 'circular', 0.0]
+
+fn circular_pad3d[padding]
+    return _pad_layer[3, padding, 'circular', 0.0]
+
+fn _pad_layer[d, padding, mode, value]
+    return _plain['pad', windows.each[padding, 2 * d, 'padding'], [value], mode]
+
+--- upsample[size, scale_factor, mode, align_corners]: F.interpolate as a
+--- layer (nn.Upsample); upsampling_nearest2d and upsampling_bilinear2d
+--- its forms PyTorch names (the latter's corners aligned)
+fn upsample[size = 0, scale_factor = 0.0, mode = 'nearest', align_corners = false]
+    sizes = []
+    if str[size] ne '0'
+        sizes = windows.listed[size, 'size']
+    return _leaf['upsample', 0, concat[[len[sizes]], sizes], m.flatten[m.tensor[[scale_factor]]] + 0.0, mode, [align_corners]]
+
+fn upsampling_nearest2d[size = 0, scale_factor = 0.0]
+    return upsample[size, scale_factor, 'nearest', false]
+
+fn upsampling_bilinear2d[size = 0, scale_factor = 0.0]
+    return upsample[size, scale_factor, 'bilinear', true]
+
+--- pixel_shuffle[r], pixel_unshuffle[r], channel_shuffle[groups]: the
+--- functions of those names as layers (nn.PixelShuffle, nn.PixelUnshuffle,
+--- nn.ChannelShuffle)
+fn pixel_shuffle[r]
+    return _plain['pixel_shuffle', [r], [0.0], '']
+
+fn pixel_unshuffle[r]
+    return _plain['pixel_unshuffle', [r], [0.0], '']
+
+fn channel_shuffle[groups]
+    return _plain['channel_shuffle', [groups], [0.0], '']
+
+--- dropout1d[p], dropout2d[p], dropout3d[p]: whole channels dropped in
+--- training (nn.Dropout1d, nn.Dropout2d, nn.Dropout3d)
+fn dropout1d[p = 0.5]
+    return _plain['dropout_channels', [1], [p], '']
+
+fn dropout2d[p = 0.5]
+    return _plain['dropout_channels', [2], [p], '']
+
+fn dropout3d[p = 0.5]
+    return _plain['dropout_channels', [3], [p], '']
+
+--- the recurrent layers -------------------------------------------------------
+
+--- rnn[input_size, hidden_size, num_layers, nonlinearity, bias,
+--- batch_first, dropout, bidirectional]: an Elman network (nn.RNN) — at
+--- each step h′ = tanh(h · w_hhᵀ + b_hh + x · w_ihᵀ + b_ih), relu where
+--- nonlinearity says — of num_layers layers, each over the one before's
+--- output, both ways where bidirectional, dropout between layers in
+--- training. Its parameters are PyTorch's, named and laid as PyTorch's
+--- (weight_ih_l0, weight_hh_l0, bias_ih_l0, bias_hh_l0, …, `_reverse`
+--- the other way) and drawn as PyTorch's: each uniform within ±1/√hidden.
+--- nn.forward answers the output; nn.recurrent the last states too
+fn rnn[input_size, hidden_size, num_layers = 1, nonlinearity = 'tanh', bias = true, batch_first = false, dropout = 0.0, bidirectional = false]
+    if nonlinearity ne 'tanh' and nonlinearity ne 'relu'
+        halt['Unknown nonlinearity \'`nonlinearity`\'. Select from \'tanh\' or \'relu\'.']
+    return _recurrent_layer['rnn', input_size, hidden_size, num_layers, bias, batch_first, dropout, bidirectional, 0, nonlinearity]
+
+--- lstm[input_size, hidden_size, num_layers, bias, batch_first, dropout,
+--- bidirectional, proj_size]: a long short-term memory (nn.LSTM), its
+--- gates i, f, g, o in that order; with proj_size its hidden state
+--- projected to that many numbers (weight_hr)
+fn lstm[input_size, hidden_size, num_layers = 1, bias = true, batch_first = false, dropout = 0.0, bidirectional = false, proj_size = 0]
+    if proj_size lt 0
+        halt['proj_size should be a positive integer or zero to disable projections']
+    if proj_size gt 0 and proj_size gte hidden_size
+        halt['proj_size has to be smaller than hidden_size']
+    return _recurrent_layer['lstm', input_size, hidden_size, num_layers, bias, batch_first, dropout, bidirectional, proj_size, '']
+
+--- gru[input_size, hidden_size, num_layers, bias, batch_first, dropout,
+--- bidirectional]: a gated recurrent unit (nn.GRU), its gates r, z, n in
+--- that order
+fn gru[input_size, hidden_size, num_layers = 1, bias = true, batch_first = false, dropout = 0.0, bidirectional = false]
+    return _recurrent_layer['gru', input_size, hidden_size, num_layers, bias, batch_first, dropout, bidirectional, 0, '']
+
+--- rnn_cell[input_size, hidden_size, bias, nonlinearity], lstm_cell,
+--- gru_cell: one step (nn.RNNCell, nn.LSTMCell, nn.GRUCell), its
+--- parameters weight_ih, weight_hh, bias_ih and bias_hh, each drawn within
+--- ±1/√hidden
+fn rnn_cell[input_size, hidden_size, bias = true, nonlinearity = 'tanh']
+    if nonlinearity ne 'tanh' and nonlinearity ne 'relu'
+        halt['Unknown nonlinearity: `nonlinearity`']
+    return _cell_layer['rnn_cell', input_size, hidden_size, bias, nonlinearity]
+
+fn lstm_cell[input_size, hidden_size, bias = true]
+    return _cell_layer['lstm_cell', input_size, hidden_size, bias, '']
+
+fn gru_cell[input_size, hidden_size, bias = true]
+    return _cell_layer['gru_cell', input_size, hidden_size, bias, '']
+
+--- how many gates a recurrent form's weights stack
+fn _gate_count[form]
+    if form eq 'lstm' or form eq 'lstm_cell'
+        return 4
+    if form eq 'gru' or form eq 'gru_cell'
+        return 3
+    return 1
+
+fn _recurrent_layer[form, ins, hidden, layers, bias, batch_first, dropout, bidirectional, proj, word]
+    if hidden lt 1
+        halt['hidden_size must be greater than zero']
+    if layers lt 1
+        halt['num_layers must be greater than zero']
+    if dropout lt 0.0 or dropout gt 1.0
+        halt['dropout should be a number in range [0, 1] representing the probability of an element being zeroed']
+    gates = _gate_count[form]
+    dirs = 1
+    if bidirectional
+        dirs = 2
+    hout = hidden
+    if proj gt 0
+        hout = proj
+    own = 0
+    for l in range[layers]
+        width = ins
+        if l gt 0
+            width = dirs * hout
+        per = gates * hidden * width + gates * hidden * hout
+        if bias
+            per = per + 2 * gates * hidden
+        if proj gt 0
+            per = per + proj * hidden
+        own = own + dirs * per
+    return _leaf[form, own, [ins, hidden, layers, proj, dirs], [float[dropout]], word, [bias, batch_first, bidirectional]]
+
+fn _cell_layer[form, ins, hidden, bias, word]
+    gates = _gate_count[form]
+    own = gates * hidden * (ins + hidden)
+    if bias
+        own = own + 2 * gates * hidden
+    return _leaf[form, own, [ins, hidden, 1, 0, 1], [0.0], word, [bias, false, false]]
 
 --- the activations, each nn.functional's function as a layer
 fn relu[]
@@ -355,8 +691,31 @@ fn _run[layer, theta, v, dims]
         return m.flatten[functional.prelu[_channeled[v, dims], w]]
     if f eq 'dropout'
         return functional.dropout[v, layer.floats[0], layer.training]
-    if f eq 'identity' or f eq 'flatten'
+    if f eq 'identity' or f eq 'flatten' or f eq 'unflatten'
         return v
+    if f eq 'conv' or f eq 'conv_transpose'
+        return _windowed[layer, theta, v, dims]
+    if f eq 'max_pool' or f eq 'avg_pool' or f eq 'lp_pool' or f eq 'adaptive_avg_pool' or f eq 'adaptive_max_pool'
+        return _pooled[layer, v, dims]
+    if f eq 'pad'
+        return m.flatten[functional.pad[shapes.laid[v, dims], layer.ints, layer.word, layer.floats[0]]]
+    if f eq 'upsample'
+        return m.flatten[_upsampled[layer, shapes.laid[v, dims]]]
+    if f eq 'pixel_shuffle'
+        return m.flatten[functional.pixel_shuffle[shapes.laid[v, dims], layer.ints[0]]]
+    if f eq 'pixel_unshuffle'
+        return m.flatten[functional.pixel_unshuffle[shapes.laid[v, dims], layer.ints[0]]]
+    if f eq 'channel_shuffle'
+        return m.flatten[functional.channel_shuffle[shapes.laid[v, dims], layer.ints[0]]]
+    if f eq 'dropout_channels'
+        x = shapes.laid[v, dims]
+        if layer.ints[0] eq 1
+            return m.flatten[functional.dropout1d[x, layer.floats[0], layer.training]]
+        if layer.ints[0] eq 2
+            return m.flatten[functional.dropout2d[x, layer.floats[0], layer.training]]
+        return m.flatten[functional.dropout3d[x, layer.floats[0], layer.training]]
+    if f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+        return _recurrence[layer, theta, v, dims, 0.0, 0.0].output
     if f eq 'glu' or f eq 'softmax' or f eq 'log_softmax' or f eq 'softmin'
         x = _around[v, dims, layer.ints[0]]
         if f eq 'glu'
@@ -391,6 +750,73 @@ fn _after[layer, dims]
     if f eq 'glu'
         a = shapes.axis_of[dims, layer.ints[0]]
         return shapes.with_size[dims, a, dims[a] / 2]
+    if f eq 'unflatten'
+        a = shapes.axis_of[dims, layer.ints[0]]
+        sizes = slice[layer.ints, 1, len[layer.ints]]
+        known = 1
+        for d in sizes
+            if d ne -1
+                known = known * d
+        out = slice[dims, 0, a]
+        for d in sizes
+            if d eq -1
+                out = push[out, dims[a] / known]
+            else
+                out = push[out, d]
+        if shapes.product[slice[out, a, len[out]]] ne dims[a]
+            halt['unflatten: the sizes `str[sizes]` do not hold the `dims[a]` numbers of axis `a`']
+        for d in slice[dims, a + 1, len[dims]]
+            out = push[out, d]
+        return out
+    if f eq 'conv' or f eq 'conv_transpose'
+        d = layer.ints[0]
+        given = windows.batch_of[dims, d, f]
+        if f eq 'conv'
+            at = windows.outs[given.sizes, _part[layer, 0], _part[layer, 1], windows.Pads[_part[layer, 2], _part[layer, 3]], _part[layer, 4], f]
+            return windows.batch_dims[given, layer.ints[2], at]
+        return windows.batch_dims[given, layer.ints[2], functional.transposed_sizes[given.sizes, _part[layer, 0], _part[layer, 1], _part[layer, 2], _part[layer, 3], _part[layer, 4], f]]
+    if f eq 'max_pool' or f eq 'avg_pool' or f eq 'lp_pool'
+        d = layer.ints[0]
+        given = windows.planes_of[dims, d, f]
+        pads = windows.each[0, d, f]
+        if f ne 'lp_pool'
+            pads = _part[layer, 2]
+        dl = windows.each[1, d, f]
+        if f eq 'max_pool'
+            dl = _part[layer, 3]
+        return concat[given.lead, functional.pooled_sizes[given.sizes, _part[layer, 0], _part[layer, 1], pads, dl, layer.flags[0], f]]
+    if f eq 'adaptive_avg_pool' or f eq 'adaptive_max_pool'
+        given = windows.planes_of[dims, layer.ints[0], f]
+        return concat[given.lead, _part[layer, 0]]
+    if f eq 'pad'
+        return windows.padded_dims[dims, layer.ints]
+    if f eq 'upsample'
+        k = layer.ints[0]
+        sizes = slice[dims, 2, len[dims]]
+        if k gt 0
+            return concat[slice[dims, 0, 2], windows.each[slice[layer.ints, 1, 1 + k], len[sizes], 'size']]
+        out = slice[dims, 0, 2]
+        for j in range[len[sizes]]
+            s = layer.floats[0]
+            if len[layer.floats] eq len[sizes]
+                s = layer.floats[j]
+            out = push[out, int[floor[float[sizes[j]] * s]]]
+        return out
+    if f eq 'pixel_shuffle'
+        k = len[dims]
+        r = layer.ints[0]
+        return concat[slice[dims, 0, k - 3], [dims[k - 3] / (r * r), dims[k - 2] * r, dims[k - 1] * r]]
+    if f eq 'pixel_unshuffle'
+        k = len[dims]
+        r = layer.ints[0]
+        return concat[slice[dims, 0, k - 3], [dims[k - 3] * r * r, dims[k - 2] / r, dims[k - 1] / r]]
+    if f eq 'rnn' or f eq 'lstm' or f eq 'gru'
+        hout = layer.ints[1]
+        if layer.ints[3] gt 0
+            hout = layer.ints[3]
+        return shapes.with_size[dims, len[dims] - 1, layer.ints[4] * hout]
+    if f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+        return shapes.with_size[dims, len[dims] - 1, layer.ints[1]]
     return dims
 
 --- flat numbers of sizes `dims` `[N, C, …]` laid `[N, C, M]`, M a
@@ -409,6 +835,240 @@ fn _around[v, dims, dim]
     return m.reshape[v, before, dims[a], after]
 
 --- an activation layer run on x
+--- a convolution layer run on flat numbers: its weight and bias read from
+--- theta, the input padded by its padding_mode first where that is not
+--- zeros (then convolved with no padding, as PyTorch's layer does)
+fn _windowed[layer, theta, v, dims]
+    f = layer.form
+    d = layer.ints[0]
+    ins = layer.ints[1]
+    outs = layer.ints[2]
+    groups = layer.ints[3]
+    kernel = _part[layer, 0]
+    stride = _part[layer, 1]
+    taps = shapes.product[kernel]
+    given = windows.batch_of[dims, d, f]
+    if given.channels ne ins
+        halt['`f`: expected input with `ins` channels, but got `given.channels` channels instead']
+    count = outs * (ins / groups) * taps
+    if f eq 'conv_transpose'
+        count = ins * (outs / groups) * taps
+    wv = _numbers[theta, layer.at, count]
+    b = m.zeros[outs]
+    if layer.flags[0]
+        b = _numbers[theta, layer.at + count, outs]
+    if f eq 'conv_transpose'
+        return functional.conv_transpose_flat[v, given.n, ins, given.sizes, wv, outs, kernel, b, stride, _part[layer, 2], _part[layer, 3], _part[layer, 4], groups, f]
+    pads = windows.Pads[_part[layer, 2], _part[layer, 3]]
+    dilation = _part[layer, 4]
+    if layer.word eq 'zeros'
+        return functional.conv_flat[v, given.n, ins, given.sizes, wv, outs, kernel, b, stride, pads, dilation, groups, f]
+    widths = []
+    for j in range[d]
+        a = d - 1 - j
+        widths = push[push[widths, pads.low[a]], pads.high[a]]
+    padded = windows.padded_dims[dims, widths]
+    x = m.flatten[concat[v, m.zeros[1]][windows.padded[dims, widths, layer.word, f]]]
+    none = windows.each[0, d, f]
+    return functional.conv_flat[x, given.n, ins, slice[padded, len[padded] - d, len[padded]], wv, outs, kernel, b, stride, windows.Pads[none, none], dilation, groups, f]
+
+--- a pooling layer run on flat numbers, plane by plane
+fn _pooled[layer, v, dims]
+    f = layer.form
+    d = layer.ints[0]
+    given = windows.planes_of[dims, d, f]
+    if f eq 'adaptive_avg_pool'
+        return functional.adaptive_flat[v, given.count, given.sizes, _part[layer, 0], 'avg']
+    if f eq 'adaptive_max_pool'
+        return functional.adaptive_flat[v, given.count, given.sizes, _part[layer, 0], 'max']
+    kernel = _part[layer, 0]
+    stride = _part[layer, 1]
+    if f eq 'lp_pool'
+        return functional.lp_pool_flat[v, given.count, given.sizes, layer.floats[0], kernel, stride, layer.flags[0], f]
+    if f eq 'max_pool'
+        return functional.max_pool_flat[v, given.count, given.sizes, kernel, stride, _part[layer, 2], _part[layer, 3], layer.flags[0], f]
+    return functional.avg_pool_flat[v, given.count, given.sizes, kernel, stride, _part[layer, 2], layer.flags[0], layer.flags[1], layer.ints[1], f]
+
+--- an upsampling layer run on x: F.interpolate by its size or its scale
+fn _upsampled[layer, x]
+    k = layer.ints[0]
+    if k gt 0
+        return functional.interpolate[x, slice[layer.ints, 1, 1 + k], 0.0, layer.word, layer.flags[0]]
+    return functional.interpolate[x, 0, layer.floats, layer.word, layer.flags[0]]
+
+--- a parameter's numbers as the matrix its sizes say
+fn _matrix[theta, p]
+    return m.reshape[_numbers[theta, p.at, p.dims[0] * p.dims[1]], p.dims[0], p.dims[1]]
+
+--- vectors joined, one after another
+fn _joined[pieces]
+    out = m.zeros[0]
+    for p in pieces
+        out = concat[out, p]
+    return out
+
+--- a recurrent layer run on the flat numbers `v` of x `dims` from the
+--- states h0 and c0 (flat, or a number every state starts at): its
+--- output, its last hidden states and, for an LSTM, its last cell states,
+--- each flat (`Recurrent`). PyTorch's order throughout: each layer's
+--- inputs projected for every step at once (x · w_ihᵀ + b_ih), then each
+--- step's gates the hidden state's projection plus the input's; a layer
+--- both ways runs a second time from the last step back, its outputs beside
+--- the first's; dropout between layers in training
+fn _recurrence[layer, theta, v, dims, h0, c0]
+    f = layer.form
+    ins = layer.ints[0]
+    hidden = layer.ints[1]
+    layers = layer.ints[2]
+    proj = layer.ints[3]
+    dirs = layer.ints[4]
+    bias = layer.flags[0]
+    gates = _gate_count[f]
+    hout = hidden
+    if proj gt 0
+        hout = proj
+    cell = f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+    rank = len[dims]
+    if rank eq 0 or dims[rank - 1] ne ins
+        halt['`f`: input.size(-1) must be equal to input_size. Expected `ins`, got `str[dims]`']
+    steps = 1
+    n = 1
+    batched = false
+    if cell
+        if rank ne 1 and rank ne 2
+            halt['`f`: Expected input to be 1D or 2D, got `rank`D instead']
+        batched = rank eq 2
+        if batched
+            n = dims[0]
+    else
+        if rank ne 2 and rank ne 3
+            halt['`f`: input must have 2 dimensions (unbatched) or 3, got `rank`']
+        batched = rank eq 3
+        steps = dims[0]
+        if batched
+            n = dims[1]
+            if layer.flags[1]
+                steps = dims[1]
+                n = dims[0]
+    if steps lt 1
+        halt['`f`: Expected sequence length to be larger than 0 in RNN']
+    x = v
+    if batched and layer.flags[1] and not cell
+        x = m.flatten[v[windows.swapped[n, steps, ins]]]
+    seq = m.reshape[x, steps * n, ins]
+    hs = m.zeros[dirs * layers * n * hout] + m.flatten[m.zeros[1] + h0]
+    cs = m.zeros[dirs * layers * n * hidden] + m.flatten[m.zeros[1] + c0]
+    names = _recurrent_named[layer, '']
+    per = 2
+    if bias
+        per = 4
+    if proj gt 0
+        per = per + 1
+    last_h = []
+    last_c = []
+    for l in range[layers]
+        made = []
+        for dir in range[dirs]
+            k = l * dirs + dir
+            base = k * per
+            w_ih = _matrix[theta, names[base]]
+            w_hh = _matrix[theta, names[base + 1]]
+            b_ih = m.zeros[gates * hidden]
+            b_hh = m.zeros[gates * hidden]
+            if bias
+                b_ih = _numbers[theta, names[base + 2].at, gates * hidden]
+                b_hh = _numbers[theta, names[base + 3].at, gates * hidden]
+            ig = functional.linear[seq, w_ih, b_ih]
+            h = m.reshape[slice[hs, k * n * hout, (k + 1) * n * hout], n, hout]
+            c = m.reshape[slice[cs, k * n * hidden, (k + 1) * n * hidden], n, hidden]
+            walked = []
+            for j in range[steps]
+                t = j
+                if dir eq 1
+                    t = steps - 1 - j
+                gi = slice[ig, t * n, (t + 1) * n]
+                gh = functional.linear[h, w_hh, b_hh]
+                if f eq 'lstm' or f eq 'lstm_cell'
+                    s = functional.lstm_step[gh + gi, c]
+                    c = s.c
+                    h = s.h
+                    if proj gt 0
+                        h = h * transpose[_matrix[theta, names[base + per - 1]]]
+                else
+                    if f eq 'gru' or f eq 'gru_cell'
+                        h = functional.gru_step[gi, gh, h]
+                    else
+                        if layer.word eq 'relu'
+                            h = functional.relu[m.reshape[gh + gi, n, hidden]]
+                        else
+                            h = m.tanh[gh + gi]
+                walked = push[walked, m.flatten[h]]
+            ordered = m.zeros[0]
+            for j in range[steps]
+                q = j
+                if dir eq 1
+                    q = steps - 1 - j
+                ordered = concat[ordered, walked[q]]
+            made = push[made, m.reshape[ordered, steps * n, hout]]
+            last_h = push[last_h, m.flatten[h]]
+            last_c = push[last_c, m.flatten[c]]
+        seq = made[0]
+        if dirs eq 2
+            seq = concat[made[0], made[1], axis = 1]
+        if layer.training and layer.floats[0] gt 0.0 and l lt layers - 1
+            seq = functional.dropout[seq, layer.floats[0], true]
+    out = m.flatten[seq]
+    if batched and layer.flags[1] and not cell
+        out = m.flatten[out[windows.swapped[steps, n, dirs * hout]]]
+    cells = m.zeros[0]
+    if f eq 'lstm' or f eq 'lstm_cell'
+        cells = _joined[last_c]
+    return Recurrent[out, _joined[last_h], cells]
+
+--- recurrent[layer, theta, x, h0, c0]: a recurrent layer run on x from
+--- the hidden states h0 and, for an LSTM, the cell states c0 — zeros where
+--- not given, as PyTorch's — answering its output, its last hidden states
+--- h_n and its last cell states c_n, laid as PyTorch lays them
+--- (`Recurrent`): `output, (h_n, c_n) = lstm(x, (h0, c0))`; h0 and h_n
+--- `[layers·directions, batch, hidden]` (no batch axis for an input of none);
+--- a cell's output and h_n its new hidden state `[batch, hidden]`, its c the
+--- new cell state. c holds no numbers for an RNN or a GRU
+fn recurrent[layer, theta, x, h0 = 0.0, c0 = 0.0]
+    f = layer.form
+    if not (f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell')
+        halt['nn.recurrent runs a recurrent layer (rnn, lstm, gru and their cells), and was given `f`']
+    dims = x.shape
+    hout = layer.ints[1]
+    if layer.ints[3] gt 0
+        hout = layer.ints[3]
+    hdims = _state_dims[layer, dims, hout]
+    cdims = _state_dims[layer, dims, layer.ints[1]]
+    given = (m.zeros[1] + h0).shape
+    if not (given eq [1] or given eq hdims)
+        halt['`f`: Expected hidden size `str[hdims]`, got `str[given]`']
+    held = (m.zeros[1] + c0).shape
+    if not (held eq [1] or held eq cdims)
+        halt['`f`: Expected hidden size `str[cdims]`, got `str[held]`']
+    r = _recurrence[layer, theta, m.flatten[x], dims, h0, c0]
+    if f eq 'lstm' or f eq 'lstm_cell'
+        return Recurrent[shapes.laid[r.output, _after[layer, dims]], shapes.laid[r.h, hdims], shapes.laid[r.c, cdims]]
+    return Recurrent[shapes.laid[r.output, _after[layer, dims]], shapes.laid[r.h, hdims], r.c]
+
+--- the sizes of a recurrent layer's states for an input `dims`, `size`
+--- numbers each
+fn _state_dims[layer, dims, size]
+    f = layer.form
+    cell = f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+    out = []
+    if not cell
+        out = [layer.ints[4] * layer.ints[2]]
+    if (cell and len[dims] eq 2) or ((not cell) and len[dims] eq 3)
+        n = dims[0]
+        if (not cell) and (not layer.flags[1])
+            n = dims[1]
+        out = push[out, n]
+    return push[out, size]
+
 fn _activated[layer, x]
     f = layer.form
     v = layer.floats
@@ -554,6 +1214,26 @@ fn _own_drawn[layer, g]
         return w
     if f eq 'embedding'
         return rng.normal[g, layer.own]
+    if f eq 'conv' or f eq 'conv_transpose'
+        ins = layer.ints[1]
+        outs = layer.ints[2]
+        groups = layer.ints[3]
+        taps = shapes.product[_part[layer, 0]]
+        fan_in = (ins / groups) * taps
+        count = outs * fan_in
+        if f eq 'conv_transpose'
+            fan_in = (outs / groups) * taps
+            count = ins * fan_in
+        bound = _kaiming_bound[fan_in]
+        w = rng.uniform[g, count, -bound, bound]
+        if layer.flags[0]
+            b = 1.0 / sqrt[float[fan_in]]
+            bias = rng.uniform[w.generator, outs, -b, b]
+            return rng.Floats[concat[w.values, bias.values], bias.generator]
+        return w
+    if f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+        stdv = 1.0 / sqrt[float[layer.ints[1]]]
+        return rng.uniform[g, layer.own, -stdv, stdv]
     return rng.Floats[_own_fixed[layer], g]
 
 --- a layer's own parameters that no draw makes
@@ -622,7 +1302,60 @@ fn _own_named[layer, prefix]
         return out
     if f eq 'prelu'
         return [Named['`prefix`weight', at, layer.ints]]
+    if f eq 'conv' or f eq 'conv_transpose'
+        ins = layer.ints[1]
+        outs = layer.ints[2]
+        groups = layer.ints[3]
+        dims = concat[[outs, ins / groups], _part[layer, 0]]
+        if f eq 'conv_transpose'
+            dims = concat[[ins, outs / groups], _part[layer, 0]]
+        out = [Named['`prefix`weight', at, dims]]
+        if layer.flags[0]
+            out = push[out, Named['`prefix`bias', at + shapes.product[dims], [outs]]]
+        return out
+    if f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+        return _recurrent_named[layer, prefix]
     return []
+
+--- a recurrent layer's parameters, named and laid as PyTorch's: for each
+--- layer and direction weight_ih, weight_hh, bias_ih, bias_hh and an LSTM's
+--- projection weight_hr, suffixed `_l0`, `_l0_reverse`, … (a cell's bare)
+fn _recurrent_named[layer, prefix]
+    f = layer.form
+    ins = layer.ints[0]
+    hidden = layer.ints[1]
+    proj = layer.ints[3]
+    dirs = layer.ints[4]
+    gates = _gate_count[f]
+    hout = hidden
+    if proj gt 0
+        hout = proj
+    cell = f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+    out = []
+    at = layer.at
+    for l in range[layer.ints[2]]
+        width = ins
+        if l gt 0
+            width = dirs * hout
+        for dir in range[dirs]
+            tail = '_l`l`'
+            if dir eq 1
+                tail = '_l`l`_reverse'
+            if cell
+                tail = ''
+            out = push[out, Named['`prefix`weight_ih`tail`', at, [gates * hidden, width]]]
+            at = at + gates * hidden * width
+            out = push[out, Named['`prefix`weight_hh`tail`', at, [gates * hidden, hout]]]
+            at = at + gates * hidden * hout
+            if layer.flags[0]
+                out = push[out, Named['`prefix`bias_ih`tail`', at, [gates * hidden]]]
+                at = at + gates * hidden
+                out = push[out, Named['`prefix`bias_hh`tail`', at, [gates * hidden]]]
+                at = at + gates * hidden
+            if proj gt 0
+                out = push[out, Named['`prefix`weight_hr`tail`', at, [proj, hidden]]]
+                at = at + proj * hidden
+    return out
 
 --- ranges[model, paths]: the [at, size] ranges of theta the named
 --- parameters take, in theta's order, for an optimizer's group

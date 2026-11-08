@@ -11,7 +11,7 @@ follows: PyTorch in float64, scikit-learn, scipy, networkx, faiss.
 
 | Package | What it is |
 |---|---|
-| [`packages/nn`](packages/nn) | activations, losses, layers, modules, initialisers, optimisers and their schedules — PyTorch's `torch.nn`, `torch.nn.functional`, `torch.nn.init` and `torch.optim` |
+| [`packages/nn`](packages/nn) | activations, losses, layers (linear, convolutions, poolings, paddings, resamplings, RNN/LSTM/GRU, norms, embeddings), modules, initialisers, optimisers and their schedules — PyTorch's `torch.nn`, `torch.nn.functional`, `torch.nn.init` and `torch.optim` |
 | [`packages/stats`](packages/stats) | descriptive statistics, correlation, tests and fits — scipy.stats |
 | [`packages/models`](packages/models/README.md) | the classical models, metrics, cross-validation — scikit-learn |
 | [`packages/optimize`](packages/optimize/README.md) | minimisers and roots — scipy.optimize |

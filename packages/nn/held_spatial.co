@@ -1,0 +1,324 @@
+--- nn's convolutions, poolings, paddings, resamplings and recurrent
+--- layers held to PyTorch in float64 (reference/spatial_reference.py,
+--- torch 2.8). Each case of reference/expected/sp_cases.csv is one of
+--- PyTorch's functions applied to fixed inputs (reference/data/
+--- sp_inputs.csv), or one of its modules made from torch.manual_seed and
+--- run; its row is the numbers of the value, then the gradient of the sum
+--- of the value times fixed weights with respect to each input. A layer's
+--- row starts with the parameters torch drew, which pie draws from a torch
+--- generator seeded alike — the same numbers, exactly — and their gradient
+--- comes after the value's numbers. Every number agrees to 1e-12, relative
+--- above 1 and absolute below, unless the reference says why.
+use math, frame
+use nn
+use rng
+use functional as F
+use shapes
+
+--- the sizes of a case's inputs, up to seven
+struct Dims [x1, x2, x3, x4, x5, x6, x7]
+
+--- an input: its numbers, flat, and its sizes
+struct Input [values, dims]
+
+fn numbers[given]
+    out = []
+    for piece in split[given, ' ']
+        if piece ne ''
+            out = push[out, float[piece]]
+    return out
+
+fn sizes[given]
+    out = []
+    for d in json[given]
+        out = push[out, int[d]]
+    return out
+
+--- every input by name; `none`, an input a case does not take, one zero
+fn inputs[]
+    rows = frame.load['packages/nn/reference/data/sp_inputs.csv']
+    out = map[]
+    for i in range[len[rows]]
+        out[str[rows.name[i]]] = Input[math.tensor[numbers[str[rows.values[i]]]], sizes[str[rows.dims[i]]]]
+    out['none'] = Input[math.zeros[1], [1]]
+    return out
+
+--- the weights a case's value is summed with: whole eighths, as the
+--- reference's
+fn weights_for[n]
+    vals = for k in range[n]
+        float[(k * 7) % 11 - 5] / 4.0 + 0.125
+    return tensor[vals]
+
+--- a function case's value, its numbers flat; the inputs come flat and are
+--- laid in their sizes here
+fn applied[name, d, x1, x2, x3, x4, x5, x6, x7]
+    a = shapes.laid[x1, d.x1]
+    w = shapes.laid[x2, d.x2]
+    if name eq 'conv1d'
+        return math.flatten[F.conv1d[a, w, x3, stride = 2, padding = 1]]
+    if name eq 'conv1d_groups'
+        return math.flatten[F.conv1d[a, w, x3, padding = 'same', dilation = 2, groups = 2]]
+    if name eq 'conv2d'
+        return math.flatten[F.conv2d[a, w, x3, stride = [2, 1], padding = 1]]
+    if name eq 'conv2d_same'
+        return math.flatten[F.conv2d[a, w, x3, padding = 'same', dilation = [1, 2]]]
+    if name eq 'conv2d_groups'
+        return math.flatten[F.conv2d[a, w, groups = 2]]
+    if name eq 'conv3d'
+        return math.flatten[F.conv3d[a, w, x3, stride = [1, 2, 1], padding = [1, 0, 1]]]
+    if name eq 'conv_transpose1d'
+        return math.flatten[F.conv_transpose1d[a, w, x3, stride = 2, padding = 1, output_padding = 1]]
+    if name eq 'conv_transpose2d'
+        return math.flatten[F.conv_transpose2d[a, w, x3, stride = [2, 1], padding = [1, 0], output_padding = [1, 0], groups = 2, dilation = [1, 2]]]
+    if name eq 'conv_transpose3d'
+        return math.flatten[F.conv_transpose3d[a, w, stride = 2]]
+    if name eq 'unfold'
+        return math.flatten[F.unfold[a, [2, 3], padding = 1, stride = [2, 1]]]
+    if name eq 'fold'
+        return math.flatten[F.fold[F.unfold[a, [2, 3], padding = 1, stride = [2, 1]], [5, 6], [2, 3], padding = 1, stride = [2, 1]]]
+    if name eq 'max_pool1d'
+        return math.flatten[F.max_pool1d[a, 3, stride = 2, padding = 1]]
+    if name eq 'max_pool2d'
+        return math.flatten[F.max_pool2d[a, [3, 2], stride = [2, 1], padding = [1, 0], dilation = [1, 2], ceil_mode = true]]
+    if name eq 'max_pool3d'
+        return math.flatten[F.max_pool3d[a, 2]]
+    if name eq 'avg_pool1d'
+        return math.flatten[F.avg_pool1d[a, 3, stride = 2, padding = 1, ceil_mode = true, count_include_pad = false]]
+    if name eq 'avg_pool2d'
+        return math.flatten[F.avg_pool2d[a, 3, stride = 2, padding = 1, ceil_mode = true]]
+    if name eq 'avg_pool2d_divisor'
+        return math.flatten[F.avg_pool2d[a, 3, stride = 2, padding = 1, divisor_override = 4]]
+    if name eq 'avg_pool3d'
+        return math.flatten[F.avg_pool3d[a, [2, 3, 2], stride = [2, 1, 2], padding = [1, 1, 0]]]
+    if name eq 'adaptive_avg_pool1d'
+        return math.flatten[F.adaptive_avg_pool1d[a, 3]]
+    if name eq 'adaptive_avg_pool2d'
+        return math.flatten[F.adaptive_avg_pool2d[a, [3, 4]]]
+    if name eq 'adaptive_avg_pool3d'
+        return math.flatten[F.adaptive_avg_pool3d[a, [2, 3, 3]]]
+    if name eq 'adaptive_max_pool1d'
+        return math.flatten[F.adaptive_max_pool1d[a, 4]]
+    if name eq 'adaptive_max_pool2d'
+        return math.flatten[F.adaptive_max_pool2d[a, [3, 4]]]
+    if name eq 'lp_pool1d'
+        return math.flatten[F.lp_pool1d[a, 2.0, 3, stride = 2]]
+    if name eq 'lp_pool2d'
+        return math.flatten[F.lp_pool2d[a, 3.0, 2]]
+    if name eq 'pad_constant'
+        return math.flatten[F.pad[a, [1, 2, 0, 1], value = 0.5]]
+    if name eq 'pad_cut'
+        return math.flatten[F.pad[a, [-1, 1, 2, -1]]]
+    if name eq 'pad_reflect'
+        return math.flatten[F.pad[a, [2, 1, 1, 3], 'reflect']]
+    if name eq 'pad_replicate'
+        return math.flatten[F.pad[a, [2, 1, 3, 0], 'replicate']]
+    if name eq 'pad_circular'
+        return math.flatten[F.pad[a, [1, 2, 2, 1], 'circular']]
+    if name eq 'pad_reflect1d'
+        return math.flatten[F.pad[a, [2, 3], 'reflect']]
+    if name eq 'pad_replicate3d'
+        return math.flatten[F.pad[a, [1, 1, 2, 0, 1, 1], 'replicate']]
+    if name eq 'pixel_shuffle'
+        return math.flatten[F.pixel_shuffle[a, 2]]
+    if name eq 'pixel_unshuffle'
+        return math.flatten[F.pixel_unshuffle[a, 2]]
+    if name eq 'channel_shuffle'
+        return math.flatten[F.channel_shuffle[a, 3]]
+    if name eq 'nearest'
+        return math.flatten[F.interpolate[a, [7, 3]]]
+    if name eq 'nearest_double'
+        return math.flatten[F.interpolate[a, scale_factor = 2.0]]
+    if name eq 'nearest_scale'
+        return math.flatten[F.interpolate[a, scale_factor = 1.7]]
+    if name eq 'nearest_exact'
+        return math.flatten[F.interpolate[a, [6, 8], mode = 'nearest-exact']]
+    if name eq 'linear'
+        return math.flatten[F.interpolate[a, 8, mode = 'linear']]
+    if name eq 'linear_corners'
+        return math.flatten[F.interpolate[a, 8, mode = 'linear', align_corners = true]]
+    if name eq 'bilinear'
+        return math.flatten[F.interpolate[a, [7, 8], mode = 'bilinear']]
+    if name eq 'bilinear_scale'
+        return math.flatten[F.interpolate[a, scale_factor = [1.5, 2.3], mode = 'bilinear', align_corners = true]]
+    if name eq 'trilinear'
+        return math.flatten[F.interpolate[a, [5, 6, 4], mode = 'trilinear']]
+    if name eq 'area'
+        return math.flatten[F.interpolate[a, [3, 4], mode = 'area']]
+    --- the cells: x, h, (c,) w_ih, w_hh, b_ih, b_hh
+    if name eq 'rnn_tanh_cell'
+        return math.flatten[F.rnn_tanh_cell[a, w, shapes.laid[x3, d.x3], shapes.laid[x4, d.x4], x5, x6]]
+    if name eq 'rnn_relu_cell'
+        return math.flatten[F.rnn_relu_cell[a, w, shapes.laid[x3, d.x3], shapes.laid[x4, d.x4], x5, x6]]
+    if name eq 'gru_cell'
+        return math.flatten[F.gru_cell[a, w, shapes.laid[x3, d.x3], shapes.laid[x4, d.x4], x5, x6]]
+    if name eq 'lstm_cell'
+        s = F.lstm_cell[a, w, shapes.laid[x3, d.x3], shapes.laid[x4, d.x4], shapes.laid[x5, d.x5], x6, x7]
+        return concat[math.flatten[s.h], math.flatten[s.c]]
+    halt['no function case `name`']
+
+--- a function case's value summed with the weights, which grad
+--- differentiates
+fn probe[name, d, x1, x2, x3, x4, x5, x6, x7, c]
+    return sum[applied[name, d, x1, x2, x3, x4, x5, x6, x7] .* c]
+
+--- the layer of each layer case, made as the reference makes PyTorch's
+fn layer_of[name]
+    if name eq 'Conv1d'
+        return nn.conv1d[3, 4, 3, stride = 2, padding = 1]
+    if name eq 'Conv2d_reflect'
+        return nn.conv2d[3, 4, [3, 2], padding = 1, padding_mode = 'reflect']
+    if name eq 'Conv2d_circular_same'
+        return nn.conv2d[4, 6, 3, padding = 'same', padding_mode = 'circular', groups = 2, bias = false]
+    if name eq 'Conv3d_replicate'
+        return nn.conv3d[2, 3, 2, padding = 1, padding_mode = 'replicate']
+    if name eq 'ConvTranspose2d'
+        return nn.conv_transpose2d[4, 6, [3, 2], stride = [2, 1], padding = [1, 0], output_padding = [1, 0], groups = 2, dilation = [1, 2]]
+    if name eq 'ConvTranspose1d'
+        return nn.conv_transpose1d[3, 2, 3, stride = 2, padding = 1, output_padding = 1]
+    if name eq 'RNN_bidirectional'
+        return nn.rnn[3, 5, num_layers = 2, bidirectional = true, batch_first = true]
+    if name eq 'RNN_relu_unbatched'
+        return nn.rnn[3, 4, nonlinearity = 'relu']
+    if name eq 'LSTM_projected'
+        return nn.lstm[3, 5, num_layers = 2, proj_size = 2, bidirectional = true]
+    if name eq 'LSTM'
+        return nn.lstm[3, 4]
+    if name eq 'GRU_batch_first'
+        return nn.gru[3, 4, num_layers = 2, batch_first = true]
+    if name eq 'GRU_no_bias'
+        return nn.gru[3, 4, bias = false]
+    if name eq 'RNNCell'
+        return nn.rnn_cell[4, 5]
+    if name eq 'LSTMCell'
+        return nn.lstm_cell[4, 5]
+    if name eq 'GRUCell'
+        return nn.gru_cell[4, 5]
+    if name eq 'CNN'
+        return nn.sequential[[nn.conv2d[3, 4, 3, padding = 1], nn.relu[], nn.max_pool2d[2], nn.flatten[], nn.linear[24, 5]]]
+    if name eq 'Windows'
+        return nn.sequential[[nn.reflection_pad2d[[1, 0, 2, 1]], nn.conv2d[3, 8, 3], nn.pixel_shuffle[2], nn.adaptive_avg_pool2d[[3, 4]], nn.upsample[scale_factor = 2.0, mode = 'bilinear'], nn.zero_pad2d[1], nn.avg_pool2d[2], nn.unflatten[1, [1, 2]]]]
+    if name eq 'Sequence'
+        return nn.sequential[[nn.conv1d[2, 4, 3], nn.lp_pool1d[2, 2], nn.upsample[scale_factor = 1.5, mode = 'linear'], nn.avg_pool1d[3, stride = 1, padding = 1, count_include_pad = false], nn.constant_pad1d[[1, 2], 0.25], nn.conv_transpose1d[4, 2, 2, stride = 2], nn.adaptive_max_pool1d[5]]]
+    halt['no layer case `name`']
+
+fn recurrent_form[f]
+    return f eq 'rnn' or f eq 'lstm' or f eq 'gru' or f eq 'rnn_cell' or f eq 'lstm_cell' or f eq 'gru_cell'
+
+--- a layer case's value, its numbers flat: a recurrent layer's output,
+--- then h_n, then c_n (nn.recurrent), from the states the case gives
+fn valued[layer, d, theta, x1, x2, x3]
+    x = shapes.laid[x1, d.x1]
+    if recurrent_form[layer.form]
+        r = nn.recurrent[layer, theta, x, shapes.laid[x2, d.x2], shapes.laid[x3, d.x3]]
+        return concat[concat[math.flatten[r.output], math.flatten[r.h]], math.flatten[r.c]]
+    return math.flatten[nn.forward[layer, theta, x]]
+
+fn layered[layer, d, theta, x1, x2, x3, c]
+    return sum[valued[layer, d, theta, x1, x2, x3] .* c]
+
+--- a case's inputs by the names its row lists
+fn named_inputs[listed, given]
+    out = []
+    for n in split[listed, ' ']
+        out = push[out, given[n]]
+    return out
+
+fn dims_of[ins]
+    return Dims[ins[0].dims, ins[1].dims, ins[2].dims, ins[3].dims, ins[4].dims, ins[5].dims, ins[6].dims]
+
+--- how many inputs a case takes: those not named `none`
+fn taken[listed]
+    k = 0
+    for n in split[listed, ' ']
+        if n ne 'none'
+            k = k + 1
+    return k
+
+--- a function case's row
+fn function_row[name, listed, given]
+    ins = named_inputs[listed, given]
+    d = dims_of[ins]
+    value = applied[name, d, ins[0].values, ins[1].values, ins[2].values, ins[3].values, ins[4].values, ins[5].values, ins[6].values]
+    gs = grad[probe][name, d, ins[0].values, ins[1].values, ins[2].values, ins[3].values, ins[4].values, ins[5].values, ins[6].values, weights_for[len[value]]]
+    row = value
+    for i in range[taken[listed]]
+        row = concat[row, math.flatten[gs[i]]]
+    return row
+
+--- a layer case's row: theta as pie draws it, the value, theta's gradient
+--- and each input's
+fn layer_row[name, listed, given, seeded]
+    layer = layer_of[name]
+    ins = named_inputs[listed, given]
+    d = dims_of[ins]
+    theta = nn.parameters[layer, rng.manual_seed[seeded]].values
+    value = valued[layer, d, theta, ins[0].values, ins[1].values, ins[2].values]
+    gs = grad[layered][layer, d, theta, ins[0].values, ins[1].values, ins[2].values, weights_for[len[value]]]
+    row = concat[theta, value]
+    for i in range[taken[listed] + 1]
+        row = concat[row, math.flatten[gs[i]]]
+    return row
+
+--- the largest difference of two rows, relative where a number is above
+--- 1 and absolute below; a row of another length is apart by ∞
+fn apart[got, want]
+    if len[got] ne len[want]
+        return inf
+    return max[abs[got - want] ./ (abs[want] + 1.0)]
+
+--- the cases whose rows are not the reference's, each with its distance;
+--- a layer whose parameters pie draws are not torch's numbers exactly is
+--- named with them
+fn disagreements[]
+    given = inputs[]
+    cases = frame.load['packages/nn/reference/expected/sp_cases.csv']
+    out = []
+    for i in range[len[cases]]
+        name = str[cases.case[i]]
+        listed = str[cases.inputs[i]]
+        seeded = int[cases.seed[i]]
+        want = math.tensor[numbers[str[cases.row[i]]]]
+        got = math.zeros[0]
+        if seeded lt 0
+            got = function_row[name, listed, given]
+        else
+            got = layer_row[name, listed, given, seeded]
+            n = nn.size[layer_of[name]]
+            if not (slice[got, 0, n] eq slice[want, 0, n])
+                out = push[out, '`name` draws other parameters']
+        gap = apart[got, want]
+        if gap gt float[cases.within[i]]
+            out = push[out, '`name` `gap`']
+    return out
+
+test nn_windows_and_recurrent_layers_agree_with_pytorch[]
+    disagreements[] eq []
+
+--- a recurrent layer starts from zeros where no state is given, as
+--- PyTorch's; a cell's output is its new hidden state
+test a_recurrent_layer_starts_from_zeros[]
+    layer = nn.lstm[3, 4, num_layers = 2]
+    theta = nn.parameters[layer, rng.manual_seed[3]].values
+    x = math.reshape[math.tensor[[0.5, -1.0, 0.25, 2.0, 0.0, -0.75, 1.5, 0.125, -2.0, 1.0, 0.5, -0.5]], 2, 2, 3]
+    given = nn.recurrent[layer, theta, x]
+    zeros = nn.recurrent[layer, theta, x, math.zeros[2, 2, 4], math.zeros[2, 2, 4]]
+    math.flatten[given.output] eq math.flatten[zeros.output]
+    given.h.shape eq [2, 2, 4]
+    given.c.shape eq [2, 2, 4]
+    math.flatten[nn.forward[layer, theta, x]] eq math.flatten[given.output]
+    cell = nn.gru_cell[3, 4]
+    step = nn.recurrent[cell, nn.parameters[cell, rng.manual_seed[4]].values, x[0]]
+    math.flatten[step.output] eq math.flatten[step.h]
+    len[step.c] eq 0
+
+--- a channel dropout zeroes whole channels and scales the rest, and does
+--- nothing in evaluation
+test a_channel_dropout_drops_whole_channels[]
+    seed[2]
+    y = F.dropout2d[math.ones[4, 8, 3, 3], 0.5]
+    counts = sum[math.reshape[y, 32, 9], 1]
+    max[abs[counts .* (counts - 18.0)]] eq 0.0
+    F.dropout1d[math.ones[2, 3, 4], 0.5, false] eq math.ones[2, 3, 4]
+    model = nn.eval[nn.sequential[[nn.dropout3d[0.5]]]]
+    nn.forward[model, math.zeros[0], math.ones[1, 2, 2, 2, 2]] eq math.ones[1, 2, 2, 2, 2]

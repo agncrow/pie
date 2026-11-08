@@ -8,7 +8,7 @@
 --- mean of its terms or their sum (`reduction`); its `_each` form answers
 --- the term of each item, as PyTorch's `reduction='none'` does.
 use math
-use shapes
+use shapes, windows, single
 
 --- zeros of x's shape (x times 0: its rank stays known)
 fn _zeros_like[x]
@@ -218,6 +218,33 @@ fn dropout[x, p = 0.5, training = true]
         return x * 0.0
     keep = shapes.laid[math.flatten[bernoulli[1.0 - p, len[math.flatten[x]]]], x.shape]
     return x .* (keep / (1.0 - p))
+
+--- dropout1d[x, p, training]: each channel of x `[n, c, l]` (or `[c,
+--- l]`) zeroed whole with probability p and the rest scaled by 1 / (1 −
+--- p) (F.dropout1d); dropout2d and dropout3d over two and three spatial
+--- axes. The channels kept are drawn from the seeded generator
+fn dropout1d[x, p = 0.5, training = true]
+    return _channel_dropout[math.flatten[x], x.shape, p, training, 1, 'dropout1d']
+
+fn dropout2d[x, p = 0.5, training = true]
+    return _channel_dropout[math.flatten[x], x.shape, p, training, 2, 'dropout2d']
+
+fn dropout3d[x, p = 0.5, training = true]
+    return _channel_dropout[math.flatten[x], x.shape, p, training, 3, 'dropout3d']
+
+--- (the flat numbers v of a tensor laid `dims`, so one copy takes every rank)
+fn _channel_dropout[v, dims, p, training, d, what]
+    if p lt 0.0 or p gt 1.0
+        halt['`what`: p is a probability from 0 to 1, got `p`']
+    if (not training) or p eq 0.0
+        return shapes.laid[v, dims]
+    if p eq 1.0
+        return shapes.laid[v * 0.0, dims]
+    given = windows.planes_of[dims, d, what]
+    keep = math.flatten[bernoulli[1.0 - p, given.count]] / (1.0 - p)
+    inner = shapes.product[given.sizes]
+    mask = math.flatten[reshape[keep, given.count, 1] + reshape[math.zeros[inner], 1, inner]]
+    return shapes.laid[v .* mask, dims]
 
 --- linear[x, w, b]: x · wᵀ + b, the weight laid `[outs, ins]` as
 --- PyTorch's, x of any rank with ins its last axis
@@ -699,3 +726,701 @@ fn multi_margin_loss_each[x, y, p = 1, margin = 1.0, weight = 1.0]
 
 fn multi_margin_loss[x, y, p = 1, margin = 1.0, weight = 1.0, reduction = 'mean']
     return _reduce[math.flatten[multi_margin_loss_each[x, y, p, margin, weight]], reduction, 'multi_margin_loss']
+
+--- windows: convolutions, poolings, padding ------------------------------------
+
+--- a list of whole numbers, given as a list or a vector of them
+fn _whole[given]
+    out = []
+    for q in given
+        out = push[out, int[q]]
+    return out
+
+--- conv1d[x, w, b, stride, padding, dilation, groups]: the
+--- cross-correlation of x `[n, c, l]` (or `[c, l]`) with the weight
+--- `[outs, c / groups, k]`, plus the bias per output channel (F.conv1d);
+--- conv2d over `[n, c, h, w]` and conv3d over `[n, c, d, h, w]` alike.
+--- stride, padding and dilation are an int or one per spatial axis, and
+--- padding is also 'valid' (none) or 'same' (the input's size, for a
+--- stride of 1); groups splits the channels into groups convolved apart.
+--- The windows are gathered (im2col) and multiplied by the weight as one
+--- matrix, as PyTorch's float64 kernel does
+fn conv1d[x, w, b = 0.0, stride = 1, padding = 0, dilation = 1, groups = 1]
+    return _conv[x, w, b, 1, stride, padding, dilation, groups, 'conv1d']
+
+fn conv2d[x, w, b = 0.0, stride = 1, padding = 0, dilation = 1, groups = 1]
+    return _conv[x, w, b, 2, stride, padding, dilation, groups, 'conv2d']
+
+fn conv3d[x, w, b = 0.0, stride = 1, padding = 0, dilation = 1, groups = 1]
+    return _conv[x, w, b, 3, stride, padding, dilation, groups, 'conv3d']
+
+fn _conv[x, w, b, d, stride, padding, dilation, groups, what]
+    wd = w.shape
+    if len[wd] ne d + 2
+        halt['`what`: the weight takes `d + 2` axes [outs, ins / groups, kernel], and has `len[wd]`']
+    kernel = slice[wd, 2, len[wd]]
+    st = windows.each[stride, d, 'stride']
+    dl = windows.each[dilation, d, 'dilation']
+    pads = windows.padding[padding, d, kernel, dl, st, what]
+    given = windows.batch_of[x.shape, d, what]
+    if given.channels ne wd[1] * groups
+        halt['`what`: groups=`groups` and a weight of `wd[1]` channels in a group take `wd[1] * groups` channels, and the input has `given.channels`']
+    v = conv_flat[math.flatten[x], given.n, given.channels, given.sizes, math.flatten[w], wd[0], kernel, b, st, pads, dl, groups, what]
+    return shapes.laid[v, windows.batch_dims[given, wd[0], windows.outs[given.sizes, kernel, st, pads, dl, what]]]
+
+--- conv_flat[v, n, c, sizes, wv, outs, kernel, b, stride, pads, dilation,
+--- groups, what]: the convolution of a batch laid flat `[n, c, sizes]` with
+--- a weight laid flat `[outs, c / groups, kernel]`, answered flat `[n,
+--- outs, windows]` (a model's layers hand their numbers on flat)
+fn conv_flat[v, n, c, sizes, wv, outs, kernel, b, stride, pads, dilation, groups, what]
+    if groups lt 1 or c % groups ne 0 or outs % groups ne 0
+        halt['`what`: `c` channels in and `outs` out must each be a multiple of groups=`groups`']
+    at = windows.outs[sizes, kernel, stride, pads, dilation, what]
+    t = windows.table[sizes, kernel, stride, pads.low, dilation, at]
+    count = shapes.product[at]
+    taps = shapes.product[kernel]
+    plane = shapes.product[sizes]
+    cg = c / groups
+    og = outs / groups
+    if len[wv] ne outs * cg * taps
+        halt['`what`: the weight holds `len[wv]` numbers, and `outs` · `cg` · `taps` were expected']
+    xp = concat[v, math.zeros[1]]
+    y = _conv_group[xp, t, n, c, plane, wv, 0, cg, og, taps]
+    for g in range[1, groups]
+        y = concat[y, _conv_group[xp, t, n, c, plane, wv, g, cg, og, taps], axis = 1]
+    y = y + (math.zeros[outs] + b)
+    return math.flatten[math.flatten[y][windows.channels_first[n, count, outs]]]
+
+fn _conv_group[xp, t, n, c, plane, wv, g, cg, og, taps]
+    pos = windows.columns[t, n, c, plane, g * cg, cg]
+    cols = reshape[xp[pos], pos.shape[0], pos.shape[1]]
+    w = reshape[slice[wv, g * og * cg * taps, (g + 1) * og * cg * taps], og, cg * taps]
+    return cols * transpose[w]
+
+--- conv_transpose1d[x, w, b, stride, padding, output_padding, groups,
+--- dilation]: the transposed convolution of x `[n, c, l]` with the weight
+--- `[c, outs / groups, k]` (F.conv_transpose1d) — the gradient of conv1d
+--- with respect to its input: each number spread over a window of the
+--- output and the windows' overlaps added (col2im, in the order PyTorch's
+--- kernel adds them); conv_transpose2d and conv_transpose3d alike. Along
+--- an axis the output holds (l − 1)·stride − 2·padding + dilation·(k − 1)
+--- + output_padding + 1
+fn conv_transpose1d[x, w, b = 0.0, stride = 1, padding = 0, output_padding = 0, groups = 1, dilation = 1]
+    return _conv_transposed[x, w, b, 1, stride, padding, output_padding, groups, dilation, 'conv_transpose1d']
+
+fn conv_transpose2d[x, w, b = 0.0, stride = 1, padding = 0, output_padding = 0, groups = 1, dilation = 1]
+    return _conv_transposed[x, w, b, 2, stride, padding, output_padding, groups, dilation, 'conv_transpose2d']
+
+fn conv_transpose3d[x, w, b = 0.0, stride = 1, padding = 0, output_padding = 0, groups = 1, dilation = 1]
+    return _conv_transposed[x, w, b, 3, stride, padding, output_padding, groups, dilation, 'conv_transpose3d']
+
+fn _conv_transposed[x, w, b, d, stride, padding, output_padding, groups, dilation, what]
+    wd = w.shape
+    if len[wd] ne d + 2
+        halt['`what`: the weight takes `d + 2` axes [ins, outs / groups, kernel], and has `len[wd]`']
+    kernel = slice[wd, 2, len[wd]]
+    st = windows.each[stride, d, 'stride']
+    dl = windows.each[dilation, d, 'dilation']
+    p = windows.each[padding, d, 'padding']
+    op = windows.each[output_padding, d, 'output_padding']
+    given = windows.batch_of[x.shape, d, what]
+    if given.channels ne wd[0]
+        halt['`what`: the weight takes `wd[0]` channels in, and the input has `given.channels`']
+    outs = wd[1] * groups
+    v = conv_transpose_flat[math.flatten[x], given.n, given.channels, given.sizes, math.flatten[w], outs, kernel, b, st, p, op, dl, groups, what]
+    return shapes.laid[v, windows.batch_dims[given, outs, transposed_sizes[given.sizes, kernel, st, p, op, dl, what]]]
+
+--- transposed_sizes[sizes, kernel, stride, padding, output_padding,
+--- dilation, what]: the spatial sizes a transposed convolution answers
+fn transposed_sizes[sizes, kernel, stride, padding, output_padding, dilation, what]
+    out = []
+    for j in range[len[sizes]]
+        if output_padding[j] gte stride[j] and output_padding[j] gte dilation[j]
+            halt['`what`: output padding must be smaller than either stride or dilation, but got output_padding=`output_padding[j]`, stride=`stride[j]` and dilation=`dilation[j]`']
+        s = (sizes[j] - 1) * stride[j] - 2 * padding[j] + dilation[j] * (kernel[j] - 1) + output_padding[j] + 1
+        if s lt 1
+            halt['`what`: the output would hold `s` numbers along axis `j`']
+        out = push[out, s]
+    return out
+
+--- conv_transpose_flat[v, n, c, sizes, wv, outs, kernel, b, stride,
+--- padding, output_padding, dilation, groups, what]: the transposed
+--- convolution of a batch laid flat `[n, c, sizes]` with a weight laid flat
+--- `[c, outs / groups, kernel]`, answered flat `[n, outs, …]`
+fn conv_transpose_flat[v, n, c, sizes, wv, outs, kernel, b, stride, padding, output_padding, dilation, groups, what]
+    if groups lt 1 or c % groups ne 0 or outs % groups ne 0
+        halt['`what`: `c` channels in and `outs` out must each be a multiple of groups=`groups`']
+    at = transposed_sizes[sizes, kernel, stride, padding, output_padding, dilation, what]
+    t = windows.table[at, kernel, stride, padding, dilation, sizes]
+    count = shapes.product[sizes]
+    plane = shapes.product[at]
+    taps = shapes.product[kernel]
+    cg = c / groups
+    og = outs / groups
+    if len[wv] ne c * og * taps
+        halt['`what`: the weight holds `len[wv]` numbers, and `c` · `og` · `taps` were expected']
+    f = windows.folded[t, plane, n, og, count * og * taps, taps, og * taps, 1, n * count * og * taps]
+    y = _transposed_group[v, n, c, count, wv, 0, cg, og, taps, f, plane]
+    for g in range[1, groups]
+        y = concat[y, _transposed_group[v, n, c, count, wv, g, cg, og, taps, f, plane], axis = 1]
+    bias = math.zeros[outs] + b
+    rows = reshape[y, n * outs, plane] + reshape[bias[windows.channel_of_rows[n, outs]], n * outs, 1]
+    return math.flatten[rows]
+
+fn _transposed_group[v, n, c, count, wv, g, cg, og, taps, f, plane]
+    pos = windows.channels_last[n, c, count, g * cg, cg]
+    x = reshape[v[pos], pos.shape[0], pos.shape[1]]
+    w = reshape[slice[wv, g * cg * og * taps, (g + 1) * cg * og * taps], cg, og * taps]
+    cols = x * w
+    return reshape[_summed[concat[math.flatten[cols], math.zeros[1]], f], n, og * plane]
+
+--- the numbers of v at each row of positions, added along the row
+fn _summed[v, positions]
+    return sum[reshape[v[positions], positions.shape[0], positions.shape[1]], 1]
+
+--- the largest number of v at each row of positions
+fn _largest[v, positions]
+    return max[reshape[v[positions], positions.shape[0], positions.shape[1]], 1]
+
+--- unfold[x, kernel_size, dilation, padding, stride]: each window of x
+--- `[n, c, h, w]` (or `[c, h, w]`) as a column, `[n, c·taps, windows]`,
+--- its numbers by channel and then tap (F.unfold, im2col)
+fn unfold[x, kernel_size, dilation = 1, padding = 0, stride = 1]
+    kernel = windows.each[kernel_size, 2, 'kernel_size']
+    dl = windows.each[dilation, 2, 'dilation']
+    p = windows.each[padding, 2, 'padding']
+    st = windows.each[stride, 2, 'stride']
+    given = windows.batch_of[x.shape, 2, 'unfold']
+    at = windows.outs[given.sizes, kernel, st, windows.Pads[p, p], dl, 'unfold']
+    t = windows.table[given.sizes, kernel, st, p, dl, at]
+    count = shapes.product[at]
+    rows = given.channels * shapes.product[kernel]
+    pos = windows.columns[t, given.n, given.channels, shapes.product[given.sizes], 0, given.channels]
+    v = concat[math.flatten[x], math.zeros[1]][math.flatten[math.flatten[pos][windows.channels_first[given.n, count, rows]]]]
+    dims = [rows, count]
+    if given.batched
+        dims = [given.n, rows, count]
+    return shapes.laid[v, dims]
+
+--- fold[x, output_size, kernel_size, dilation, padding, stride]: columns
+--- `[n, c·taps, windows]` (or `[c·taps, windows]`) added back into images
+--- `[n, c, h, w]`, the numbers of overlapping windows added up in the
+--- order PyTorch's col2im adds them (F.fold)
+fn fold[x, output_size, kernel_size, dilation = 1, padding = 0, stride = 1]
+    sizes = windows.each[output_size, 2, 'output_size']
+    kernel = windows.each[kernel_size, 2, 'kernel_size']
+    dl = windows.each[dilation, 2, 'dilation']
+    p = windows.each[padding, 2, 'padding']
+    st = windows.each[stride, 2, 'stride']
+    dims = x.shape
+    if len[dims] ne 2 and len[dims] ne 3
+        halt['fold: x takes 2 or 3 axes ([n,] c·taps, windows), and has `len[dims]`']
+    n = 1
+    rows = dims[0]
+    count = dims[1]
+    if len[dims] eq 3
+        n = dims[0]
+        rows = dims[1]
+        count = dims[2]
+    taps = shapes.product[kernel]
+    if rows % taps ne 0
+        halt['fold: expected size of input\'s dimension 1 to be divisible by the product of kernel_size, but got input.size(1)=`rows` and kernel_size=`str[kernel]`']
+    c = rows / taps
+    at = windows.outs[sizes, kernel, st, windows.Pads[p, p], dl, 'fold']
+    if shapes.product[at] ne count
+        halt['fold: given output_size, kernel_size, dilation, padding and stride, the input\'s last axis should hold `shapes.product[at]` windows, and holds `count`']
+    t = windows.table[sizes, kernel, st, p, dl, at]
+    f = windows.folded[t, shapes.product[sizes], n, c, rows * count, taps * count, 1, count, n * rows * count]
+    v = _summed[concat[math.flatten[x], math.zeros[1]], f]
+    out = [c, sizes[0], sizes[1]]
+    if len[dims] eq 3
+        out = [n, c, sizes[0], sizes[1]]
+    return shapes.laid[v, out]
+
+--- the poolings: windows over each plane, the largest number of a window,
+--- its mean, its p-norm --------------------------------------------------------
+
+--- pooled_sizes[sizes, kernel, stride, padding, dilation, ceil_mode, what]:
+--- how many windows a pooling makes along each axis, as PyTorch counts
+--- them — with ceil_mode a last part window too, unless it would start
+--- past the input and its padding
+fn pooled_sizes[sizes, kernel, stride, padding, dilation, ceil_mode, what]
+    out = []
+    for j in range[len[sizes]]
+        reach = sizes[j] + 2 * padding[j] - dilation[j] * (kernel[j] - 1) - 1
+        if reach lt 0
+            halt['`what`: the window (`kernel[j]` taps, dilated `dilation[j]`) is larger than the input padded (`sizes[j] + 2 * padding[j]`) along axis `j`']
+        if ceil_mode
+            reach = reach + stride[j] - 1
+        o = reach / stride[j] + 1
+        if ceil_mode and (o - 1) * stride[j] gte sizes[j] + padding[j]
+            o = o - 1
+        out = push[out, o]
+    return out
+
+--- pool_stride[stride, kernel]: a pooling's strides, 0 the kernel's size
+--- (PyTorch's stride=None)
+fn pool_stride[stride, kernel]
+    out = []
+    for j in range[len[kernel]]
+        s = stride[j]
+        if s eq 0
+            s = kernel[j]
+        out = push[out, s]
+    return out
+
+fn _pool_checks[kernel, stride, padding, dilation, what]
+    for j in range[len[kernel]]
+        if kernel[j] lt 1 or stride[j] lt 1 or dilation[j] lt 1
+            halt['`what`: kernel_size, stride and dilation are 1 or more, and got `kernel[j]`, `stride[j]` and `dilation[j]`']
+        if padding[j] lt 0 or padding[j] gt ((kernel[j] - 1) * dilation[j] + 1) / 2
+            halt['`what`: pad should be at most half of effective kernel size, but got pad=`padding[j]`, kernel_size=`kernel[j]` and dilation=`dilation[j]`']
+
+--- max_pool1d[x, kernel_size, stride, padding, dilation, ceil_mode]: the
+--- largest number of each window of each plane of x `[n, c, l]` (or `[c,
+--- l]`), padding read as −∞ (F.max_pool1d); max_pool2d and max_pool3d
+--- alike. stride 0 is the kernel's size; the options are an int or one per
+--- spatial axis. A window's gradient goes to its first largest number,
+--- as PyTorch's
+fn max_pool1d[x, kernel_size, stride = 0, padding = 0, dilation = 1, ceil_mode = false]
+    return _max_pool[x, 1, kernel_size, stride, padding, dilation, ceil_mode, 'max_pool1d']
+
+fn max_pool2d[x, kernel_size, stride = 0, padding = 0, dilation = 1, ceil_mode = false]
+    return _max_pool[x, 2, kernel_size, stride, padding, dilation, ceil_mode, 'max_pool2d']
+
+fn max_pool3d[x, kernel_size, stride = 0, padding = 0, dilation = 1, ceil_mode = false]
+    return _max_pool[x, 3, kernel_size, stride, padding, dilation, ceil_mode, 'max_pool3d']
+
+fn _max_pool[x, d, kernel_size, stride, padding, dilation, ceil_mode, what]
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = pool_stride[windows.each[stride, d, 'stride'], kernel]
+    p = windows.each[padding, d, 'padding']
+    dl = windows.each[dilation, d, 'dilation']
+    given = windows.planes_of[x.shape, d, what]
+    v = max_pool_flat[math.flatten[x], given.count, given.sizes, kernel, st, p, dl, ceil_mode, what]
+    return shapes.laid[v, concat[given.lead, pooled_sizes[given.sizes, kernel, st, p, dl, ceil_mode, what]]]
+
+--- max_pool_flat[v, planes, sizes, kernel, stride, padding, dilation,
+--- ceil_mode, what]: max pooling of `planes` planes of `sizes` laid flat
+fn max_pool_flat[v, planes, sizes, kernel, stride, padding, dilation, ceil_mode, what]
+    _pool_checks[kernel, stride, padding, dilation, what]
+    at = pooled_sizes[sizes, kernel, stride, padding, dilation, ceil_mode, what]
+    t = windows.table[sizes, kernel, stride, padding, dilation, at]
+    return _largest[concat[v, tensor[[-inf]]], windows.pooled[t, planes, shapes.product[sizes]]]
+
+--- avg_pool1d[x, kernel_size, stride, padding, ceil_mode,
+--- count_include_pad]: the mean of each window of each plane (F.avg_pool1d):
+--- the window's numbers added in order and divided by its size — with its
+--- padding where count_include_pad, without where not — or by
+--- divisor_override (avg_pool2d and avg_pool3d take one). stride 0 is
+--- the kernel's size
+fn avg_pool1d[x, kernel_size, stride = 0, padding = 0, ceil_mode = false, count_include_pad = true]
+    return _avg_pool[x, 1, kernel_size, stride, padding, ceil_mode, count_include_pad, 0, 'avg_pool1d']
+
+fn avg_pool2d[x, kernel_size, stride = 0, padding = 0, ceil_mode = false, count_include_pad = true, divisor_override = 0]
+    return _avg_pool[x, 2, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override, 'avg_pool2d']
+
+fn avg_pool3d[x, kernel_size, stride = 0, padding = 0, ceil_mode = false, count_include_pad = true, divisor_override = 0]
+    return _avg_pool[x, 3, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override, 'avg_pool3d']
+
+fn _avg_pool[x, d, kernel_size, stride, padding, ceil_mode, count_include_pad, divisor_override, what]
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = pool_stride[windows.each[stride, d, 'stride'], kernel]
+    p = windows.each[padding, d, 'padding']
+    given = windows.planes_of[x.shape, d, what]
+    v = avg_pool_flat[math.flatten[x], given.count, given.sizes, kernel, st, p, ceil_mode, count_include_pad, divisor_override, what]
+    return shapes.laid[v, concat[given.lead, pooled_sizes[given.sizes, kernel, st, p, windows.each[1, d, what], ceil_mode, what]]]
+
+--- avg_pool_flat[v, planes, sizes, kernel, stride, padding, ceil_mode,
+--- count_include_pad, divisor_override, what]: average pooling laid flat
+fn avg_pool_flat[v, planes, sizes, kernel, stride, padding, ceil_mode, count_include_pad, divisor_override, what]
+    undilated = windows.each[1, len[sizes], what]
+    _pool_checks[kernel, stride, padding, undilated, what]
+    at = pooled_sizes[sizes, kernel, stride, padding, undilated, ceil_mode, what]
+    t = windows.table[sizes, kernel, stride, padding, undilated, at]
+    sums = _summed[concat[v, math.zeros[1]], windows.pooled[t, planes, shapes.product[sizes]]]
+    return sums ./ windows.tiled[windows.divisors[sizes, kernel, stride, padding, at, count_include_pad, divisor_override], planes]
+
+--- adaptive_avg_pool1d[x, output_size]: each plane cut into output_size
+--- windows as even as whole numbers allow — window i from ⌊i·l/o⌋ to
+--- ⌈(i + 1)·l/o⌉ — and each window's mean (F.adaptive_avg_pool1d), divided
+--- by its size along each axis in turn as PyTorch divides;
+--- adaptive_avg_pool2d and adaptive_avg_pool3d alike, and the
+--- adaptive_max_pool forms the largest number of each window
+fn adaptive_avg_pool1d[x, output_size]
+    return _adaptive[x, 1, output_size, 'avg', 'adaptive_avg_pool1d']
+
+fn adaptive_avg_pool2d[x, output_size]
+    return _adaptive[x, 2, output_size, 'avg', 'adaptive_avg_pool2d']
+
+fn adaptive_avg_pool3d[x, output_size]
+    return _adaptive[x, 3, output_size, 'avg', 'adaptive_avg_pool3d']
+
+fn adaptive_max_pool1d[x, output_size]
+    return _adaptive[x, 1, output_size, 'max', 'adaptive_max_pool1d']
+
+fn adaptive_max_pool2d[x, output_size]
+    return _adaptive[x, 2, output_size, 'max', 'adaptive_max_pool2d']
+
+fn adaptive_max_pool3d[x, output_size]
+    return _adaptive[x, 3, output_size, 'max', 'adaptive_max_pool3d']
+
+fn _adaptive[x, d, output_size, how, what]
+    at = windows.each[output_size, d, 'output_size']
+    given = windows.planes_of[x.shape, d, what]
+    return shapes.laid[adaptive_flat[math.flatten[x], given.count, given.sizes, at, how], concat[given.lead, at]]
+
+--- adaptive_flat[v, planes, sizes, at, how]: adaptive pooling laid flat,
+--- `how` 'avg' or 'max'
+fn adaptive_flat[v, planes, sizes, at, how]
+    a = windows.adaptive[sizes, at]
+    pos = windows.pooled[a.table, planes, shapes.product[sizes]]
+    if how eq 'max'
+        return _largest[concat[v, tensor[[-inf]]], pos]
+    out = _summed[concat[v, math.zeros[1]], pos]
+    for s in a.lengths
+        out = out ./ windows.tiled[s, planes]
+    return out
+
+--- lp_pool1d[x, norm_type, kernel_size, stride, ceil_mode]: the p-norm of
+--- each window, (Σ xᵖ)^(1/p), as PyTorch computes it: the mean of xᵖ times
+--- the window's size, its sign kept, to the power 1/p (F.lp_pool1d);
+--- lp_pool2d and lp_pool3d alike
+fn lp_pool1d[x, norm_type, kernel_size, stride = 0, ceil_mode = false]
+    return _lp_pool[x, 1, norm_type, kernel_size, stride, ceil_mode, 'lp_pool1d']
+
+fn lp_pool2d[x, norm_type, kernel_size, stride = 0, ceil_mode = false]
+    return _lp_pool[x, 2, norm_type, kernel_size, stride, ceil_mode, 'lp_pool2d']
+
+fn lp_pool3d[x, norm_type, kernel_size, stride = 0, ceil_mode = false]
+    return _lp_pool[x, 3, norm_type, kernel_size, stride, ceil_mode, 'lp_pool3d']
+
+fn _lp_pool[x, d, norm_type, kernel_size, stride, ceil_mode, what]
+    kernel = windows.each[kernel_size, d, 'kernel_size']
+    st = pool_stride[windows.each[stride, d, 'stride'], kernel]
+    given = windows.planes_of[x.shape, d, what]
+    v = lp_pool_flat[math.flatten[x], given.count, given.sizes, norm_type, kernel, st, ceil_mode, what]
+    return shapes.laid[v, concat[given.lead, pooled_sizes[given.sizes, kernel, st, windows.each[0, d, what], windows.each[1, d, what], ceil_mode, what]]]
+
+--- lp_pool_flat[v, planes, sizes, norm_type, kernel, stride, ceil_mode,
+--- what]: power-average pooling laid flat
+fn lp_pool_flat[v, planes, sizes, norm_type, kernel, stride, ceil_mode, what]
+    p = float[norm_type]
+    powered = v .^ p
+    if p eq 2.0
+        powered = v .* v
+    out = avg_pool_flat[powered, planes, sizes, kernel, stride, windows.each[0, len[sizes], what], ceil_mode, true, 0, what]
+    kept = sign[out] .* relu[abs[out]] * float[shapes.product[kernel]]
+    if p eq 2.0
+        return sqrt[kept]
+    return kept .^ (1.0 / p)
+
+--- pad[x, widths, mode, value]: x with numbers added before and after its
+--- last axes (F.pad): widths names them from the last axis — before and
+--- after it, then before and after the axis before it — and a negative one
+--- cuts numbers off (mode 'constant'). 'constant' adds `value`, 'reflect'
+--- mirrors about the edge, 'replicate' repeats it and 'circular' wraps
+--- around
+fn pad[x, widths, mode = 'constant', value = 0.0]
+    w = _whole[widths]
+    if mode ne 'constant' and (len[x.shape] lt 2 or len[w] / 2 gt len[x.shape] - 1)
+        halt['pad: mode `mode` pads an input of 2 to 5 axes along its last 1 to 3, and was given `len[w]` widths for `len[x.shape]` axes']
+    pos = windows.padded[x.shape, w, mode, 'pad']
+    return shapes.laid[concat[math.flatten[x], tensor[[value]]][pos], windows.padded_dims[x.shape, w]]
+
+--- pixel_shuffle[x, r]: `[…, c·r², h, w]` laid as `[…, c, h·r, w·r]`, each
+--- r² channels a block of r × r numbers (F.pixel_shuffle)
+fn pixel_shuffle[x, r]
+    dims = x.shape
+    k = len[dims]
+    if k lt 3
+        halt['pixel_shuffle expects input to have at least 3 dimensions, but got input with `k` dimension(s)']
+    c2 = dims[k - 3]
+    h = dims[k - 2]
+    w = dims[k - 1]
+    if r lt 1 or c2 % (r * r) ne 0
+        halt['pixel_shuffle expects its input\'s \'channel\' dimension to be divisible by the square of upscale_factor, but input.size(-3)=`c2` is not divisible by `r * r`']
+    c = c2 / (r * r)
+    pos = []
+    for ch in range[c]
+        for y in range[h * r]
+            for z in range[w * r]
+                pos = push[pos, float[((ch * r * r + (y % r) * r + z % r) * h + y / r) * w + z / r]]
+    lead = shapes.product[slice[dims, 0, k - 3]]
+    at = math.flatten[reshape[tensor[range[lead]] * float[c2 * h * w], lead, 1] + reshape[tensor[pos], 1, len[pos]]]
+    return shapes.laid[math.flatten[x][at], concat[slice[dims, 0, k - 3], [c, h * r, w * r]]]
+
+--- pixel_unshuffle[x, r]: `[…, c, h·r, w·r]` laid as `[…, c·r², h, w]`,
+--- pixel_shuffle undone (F.pixel_unshuffle)
+fn pixel_unshuffle[x, r]
+    dims = x.shape
+    k = len[dims]
+    if k lt 3
+        halt['pixel_unshuffle expects input to have at least 3 dimensions, but got input with `k` dimension(s)']
+    c = dims[k - 3]
+    hr = dims[k - 2]
+    wr = dims[k - 1]
+    if r lt 1 or hr % r ne 0 or wr % r ne 0
+        halt['pixel_unshuffle expects height and width to be divisible by downscale_factor, but got `hr` and `wr` and `r`']
+    h = hr / r
+    w = wr / r
+    pos = []
+    for ch in range[c]
+        for i in range[r]
+            for j in range[r]
+                for y in range[h]
+                    for z in range[w]
+                        pos = push[pos, float[(ch * hr + y * r + i) * wr + z * r + j]]
+    lead = shapes.product[slice[dims, 0, k - 3]]
+    at = math.flatten[reshape[tensor[range[lead]] * float[c * hr * wr], lead, 1] + reshape[tensor[pos], 1, len[pos]]]
+    return shapes.laid[math.flatten[x][at], concat[slice[dims, 0, k - 3], [c * r * r, h, w]]]
+
+--- channel_shuffle[x, groups]: the channels of x `[n, c, …]` dealt from
+--- `groups` groups in turn: channel i of the answer is channel (i mod g)
+--- · (c / g) + ⌊i / g⌋ (F.channel_shuffle)
+fn channel_shuffle[x, groups]
+    dims = x.shape
+    if len[dims] lt 3
+        halt['channel_shuffle expects input to have at least 3 dimensions, but got input with `len[dims]` dimension(s)']
+    c = dims[1]
+    if groups lt 1 or c % groups ne 0
+        halt['Number of channels must be divisible by groups. Got `c` channels and `groups` groups.']
+    per = c / groups
+    inner = shapes.product[slice[dims, 2, len[dims]]]
+    pos = []
+    for i in range[c]
+        src = (i % groups) * per + i / groups
+        for q in range[inner]
+            pos = push[pos, float[src * inner + q]]
+    at = math.flatten[reshape[tensor[range[dims[0]]] * float[c * inner], dims[0], 1] + reshape[tensor[pos], 1, len[pos]]]
+    return shapes.laid[math.flatten[x][at], dims]
+
+--- interpolate[x, size, scale_factor, mode, align_corners]: x `[n, c, …]`
+--- resampled to `size` along its spatial axes, or to their sizes times
+--- scale_factor, floored (F.interpolate). mode 'nearest' and
+--- 'nearest-exact' read the number at the position PyTorch computes in
+--- single precision; 'linear', 'bilinear' and 'trilinear' (one, two and
+--- three spatial axes) weigh the two numbers about it along each axis, the
+--- corners aligned where align_corners; 'area' is adaptive average pooling
+fn interpolate[x, size = 0, scale_factor = 0.0, mode = 'nearest', align_corners = false]
+    dims = x.shape
+    d = len[dims] - 2
+    if d lt 1 or d gt 3
+        halt['interpolate: x takes 3 to 5 axes [n, c, …], and has `len[dims]`']
+    sizes = slice[dims, 2, len[dims]]
+    scales = []
+    at = []
+    if str[size] ne '0'
+        at = windows.each[size, d, 'size']
+        for j in range[d]
+            scales = push[scales, 0.0]
+    else
+        given = math.flatten[tensor[[scale_factor]]]
+        if len[given] ne 1 and len[given] ne d
+            halt['interpolate: scale_factor takes one number or `d`, and was given `len[given]`']
+        for j in range[d]
+            s = given[0]
+            if len[given] eq d
+                s = given[j]
+            if s lte 0.0
+                halt['interpolate: either size or scale_factor should be defined, and scale_factor is `s`']
+            scales = push[scales, s]
+            at = push[at, int[floor[float[sizes[j]] * s]]]
+    planes = dims[0] * dims[1]
+    v = math.flatten[x]
+    if mode eq 'area'
+        return shapes.laid[adaptive_flat[v, planes, sizes, at, 'avg'], concat[slice[dims, 0, 2], at]]
+    if mode eq 'nearest' or mode eq 'nearest-exact'
+        return shapes.laid[math.flatten[v[windows.pooled[_nearest_table[sizes, at, scales, mode], planes, shapes.product[sizes]]]], concat[slice[dims, 0, 2], at]]
+    if not ((mode eq 'linear' and d eq 1) or (mode eq 'bilinear' and d eq 2) or (mode eq 'trilinear' and d eq 3))
+        halt['interpolate: mode `mode` is none of nearest, nearest-exact, area, and the linear mode of `d` spatial axes (linear, bilinear, trilinear)']
+    return shapes.laid[_linear_resampled[v, planes, sizes, at, scales, align_corners], concat[slice[dims, 0, 2], at]]
+
+--- the scale PyTorch reads positions by: 1 / the scale factor given, or
+--- the sizes' ratio
+fn _ratio[s, given, at]
+    if s gt 0.0
+        return 1.0 / s
+    return float[given] / float[at]
+
+--- the position nearest mode reads along an axis, as PyTorch's float
+--- arithmetic finds it
+fn _nearest_at[o, given, at, s, mode]
+    if mode eq 'nearest'
+        if at eq given
+            return o
+        if at eq 2 * given
+            return o / 2
+        scale = single.of[_ratio[s, given, at]]
+        return min[int[floor[single.of[float[o] * scale]]], given - 1]
+    scale = single.of[_ratio[s, given, at]]
+    return min[int[floor[single.of[(float[o] + 0.5) * scale]]], given - 1]
+
+fn _nearest_table[sizes, at, scales, mode]
+    d = len[sizes]
+    count = shapes.product[at]
+    out = []
+    for o in range[count]
+        rest = o
+        pos = 0
+        place = 1
+        for j in range[d]
+            a = d - 1 - j
+            here = rest % at[a]
+            rest = rest / at[a]
+            pos = pos + _nearest_at[here, sizes[a], at[a], scales[a], mode] * place
+            place = place * sizes[a]
+        out = push[out, float[pos]]
+    return reshape[tensor[out], count, 1]
+
+--- linear resampling: along each axis the source position, the index
+--- below it and the one after (the same at the edge), and their weights;
+--- the corners weighed from the last axis out, as PyTorch nests them:
+--- h0·(w0·x00 + w1·x01) + h1·(w0·x10 + w1·x11)
+fn _linear_resampled[v, planes, sizes, at, scales, align_corners]
+    d = len[sizes]
+    count = shapes.product[at]
+    corners = 1
+    for j in range[d]
+        corners = corners * 2
+    lows = []
+    nexts = []
+    highs = []
+    for j in range[d]
+        scale = _ratio[scales[j], sizes[j], at[j]]
+        if align_corners
+            scale = 0.0
+            if at[j] gt 1
+                scale = float[sizes[j] - 1] / float[at[j] - 1]
+        low = []
+        step = []
+        w1 = []
+        for o in range[at[j]]
+            src = scale * float[o]
+            if not align_corners
+                src = max[scale * (float[o] + 0.5) - 0.5, 0.0]
+            i = min[int[floor[single.of[src]]], sizes[j] - 1]
+            lam = min[max[src - float[i], 0.0], 1.0]
+            low = push[low, i]
+            off = 0
+            if i lt sizes[j] - 1
+                off = 1
+            step = push[step, off]
+            w1 = push[w1, lam]
+        lows = concat[lows, low]
+        nexts = concat[nexts, step]
+        highs = concat[highs, w1]
+    --- each output position's corners' positions in its plane
+    pos = []
+    for o in range[count]
+        for corner in range[corners]
+            rest = o
+            pick = corner
+            p = 0
+            place = 1
+            start = len[lows]
+            for j in range[d]
+                a = d - 1 - j
+                here = rest % at[a]
+                rest = rest / at[a]
+                start = start - at[a]
+                i = lows[start + here]
+                if pick % 2 eq 1
+                    i = i + nexts[start + here]
+                pick = pick / 2
+                p = p + i * place
+                place = place * sizes[a]
+            pos = push[pos, float[p]]
+    where_read = windows.pooled[reshape[tensor[pos], count, corners], planes, shapes.product[sizes]]
+    at_corners = reshape[v[where_read], where_read.shape[0], corners]
+    --- the corners, as columns, weighed from the last axis
+    weighed = []
+    for corner in range[corners]
+        weighed = push[weighed, _column[at_corners, corner]]
+    start = len[lows]
+    for j in range[d]
+        a = d - 1 - j
+        start = start - at[a]
+        w = windows.tiled[_spread[tensor[slice[highs, start, start + at[a]]], at, a], planes]
+        joined = []
+        for k in range[len[weighed] / 2]
+            joined = push[joined, (1.0 - w) .* weighed[2 * k] + w .* weighed[2 * k + 1]]
+        weighed = joined
+    return weighed[0]
+
+--- a matrix's column c as a vector
+fn _column[mat, c]
+    rows = mat.shape[0]
+    return math.flatten[math.flatten[mat][tensor[range[rows]] * float[mat.shape[1]] + float[c]]]
+
+--- a vector of axis a's numbers, one for each position of a box of
+--- sizes `at` by its coordinate along a
+fn _spread[w, at, a]
+    count = shapes.product[at]
+    inner = shapes.product[slice[at, a + 1, len[at]]]
+    pos = []
+    for o in range[count]
+        pos = push[pos, float[(o / inner) % at[a]]]
+    return math.flatten[w[tensor[pos]]]
+
+--- the recurrent cells ----------------------------------------------------------
+
+--- a step's state: the hidden state and the cell state (an LSTM's)
+struct State [h, c]
+
+--- a step's gates: rows · wᵀ + b, the rows of a matrix or one vector
+fn _gates[rows, w, b]
+    ins = w.shape[1]
+    return reshape[rows, len[math.flatten[rows]] / ins, ins] * transpose[w] + b
+
+--- a matrix's columns from `start`, `count` of them
+fn _cols[mat, start, count]
+    rows = mat.shape[0]
+    width = mat.shape[1]
+    return reshape[math.flatten[mat][reshape[tensor[range[rows]] * float[width], rows, 1] + reshape[tensor[range[start, start + count]], 1, count]], rows, count]
+
+--- rnn_tanh_cell[x, h, w_ih, w_hh, b_ih, b_hh]: one step of an Elman
+--- network, tanh(h · w_hhᵀ + b_hh + x · w_ihᵀ + b_ih) — x `[n, ins]`, h
+--- `[n, hidden]`, the weights `[hidden, ins]` and `[hidden, hidden]`
+--- (torch.rnn_tanh_cell, nn.RNNCell); rnn_relu_cell with relu
+fn rnn_tanh_cell[x, h, w_ih, w_hh, b_ih = 0.0, b_hh = 0.0]
+    return math.tanh[_gates[h, w_hh, b_hh] + _gates[x, w_ih, b_ih]]
+
+fn rnn_relu_cell[x, h, w_ih, w_hh, b_ih = 0.0, b_hh = 0.0]
+    return relu[_gates[h, w_hh, b_hh] + _gates[x, w_ih, b_ih]]
+
+--- lstm_cell[x, h, c, w_ih, w_hh, b_ih, b_hh]: one step of a long
+--- short-term memory (torch.lstm_cell, nn.LSTMCell): the gates i, f, g, o
+--- of h · w_hhᵀ + b_hh + x · w_ihᵀ + b_ih, then c′ = f·c + i·g and h′ =
+--- o·tanh(c′); the weights `[4·hidden, ins]` and `[4·hidden, hidden]`
+fn lstm_cell[x, h, c, w_ih, w_hh, b_ih = 0.0, b_hh = 0.0]
+    hidden = w_hh.shape[1]
+    gates = _gates[h, w_hh, b_hh] + _gates[x, w_ih, b_ih]
+    return lstm_step[gates, reshape[c, len[math.flatten[c]] / hidden, hidden]]
+
+--- lstm_step[gates, c]: an LSTM's step from its gates `[n, 4·hidden]` and
+--- its cell state `[n, hidden]`
+fn lstm_step[gates, c]
+    hidden = gates.shape[1] / 4
+    i = sigmoid[_cols[gates, 0, hidden]]
+    f = sigmoid[_cols[gates, hidden, hidden]]
+    g = math.tanh[_cols[gates, 2 * hidden, hidden]]
+    o = sigmoid[_cols[gates, 3 * hidden, hidden]]
+    kept = f .* c + i .* g
+    return State[o .* math.tanh[kept], kept]
+
+--- gru_cell[x, h, w_ih, w_hh, b_ih, b_hh]: one step of a gated recurrent
+--- unit (torch.gru_cell, nn.GRUCell): r and z the sigmoids of h's and x's
+--- gates added, n = tanh(x's + r·h's), h′ = (h − n)·z + n; the weights
+--- `[3·hidden, ins]` and `[3·hidden, hidden]`
+fn gru_cell[x, h, w_ih, w_hh, b_ih = 0.0, b_hh = 0.0]
+    hidden = w_hh.shape[1]
+    return gru_step[_gates[x, w_ih, b_ih], _gates[h, w_hh, b_hh], reshape[h, len[math.flatten[h]] / hidden, hidden]]
+
+--- gru_step[gi, gh, h]: a GRU's step from x's gates and h's
+fn gru_step[gi, gh, h]
+    hidden = gh.shape[1] / 3
+    r = sigmoid[_cols[gh, 0, hidden] + _cols[gi, 0, hidden]]
+    z = sigmoid[_cols[gh, hidden, hidden] + _cols[gi, hidden, hidden]]
+    n = math.tanh[_cols[gi, 2 * hidden, hidden] + _cols[gh, 2 * hidden, hidden] .* r]
+    return (h - n) .* z + n

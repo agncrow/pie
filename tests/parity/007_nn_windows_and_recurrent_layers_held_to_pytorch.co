@@ -1,0 +1,6 @@
+--- nn's convolutions, poolings, paddings, resamplings and recurrent
+--- layers held to PyTorch in both modes (held_spatial.co's check): every
+--- case's value and gradients, a layer's parameters drawn as torch draws
+--- them, compiled as interpreted
+use nn.held_spatial
+log[held_spatial.disagreements[]]

@@ -31,7 +31,7 @@ did.
 
 | Package | What it is | Held to |
 |---|---|---|
-| `nn` | tensors' activations, losses and layers; modules, the model as one parameter vector, initialisers (`nn.init`), the functional forms; `nn.optim` (SGD, Adam, AdamW, Adamax, NAdam, RAdam, RMSprop, Adagrad, Adadelta, ASGD, Rprop) and `nn.lr_scheduler`; gradient clipping; torch's generator (`nn.rng`); loaders, samplers and splits (`nn.data`); weights saved and loaded as safetensors (`nn.safetensors`) | PyTorch (float64), and the safetensors library byte for byte |
+| `nn` | tensors' activations, losses and layers — linear, convolutions and their transposes, poolings, paddings, resamplings, recurrent layers (RNN, LSTM, GRU), norms, embeddings; modules, the model as one parameter vector, initialisers (`nn.init`), the functional forms; `nn.optim` (SGD, Adam, AdamW, Adamax, NAdam, RAdam, RMSprop, Adagrad, Adadelta, ASGD, Rprop) and `nn.lr_scheduler`; gradient clipping; torch's generator (`nn.rng`); loaders, samplers and splits (`nn.data`); weights saved and loaded as safetensors (`nn.safetensors`) | PyTorch (float64), and the safetensors library byte for byte |
 | `stats` | descriptive statistics, correlation, tests, fits | scipy |
 | `models` | the classical models, metrics, cross-validation | scikit-learn |
 | `optimize` | scalar and multivariate minimisers, roots | scipy.optimize |
@@ -53,8 +53,8 @@ holds a model as two values:
 - the **parameters**: ONE vector, `theta`, every layer's weights laid end
   to end (as `torch.nn.utils.parameters_to_vector` lays them).
 
-A forward pass reads a layer's weight as `reshape[take[theta, at], rows,
-columns]`; `grad[loss][theta, x, y]` answers one vector, the gradient of
+A forward pass reads a layer's weight as `reshape[slice[theta, at, at +
+n], rows, columns]`; `grad[loss][theta, x, y]` answers one vector, the gradient of
 every parameter at once; an optimiser is arithmetic over vectors (Adam is
 element-wise, so the whole model is one update, exactly PyTorch's per
 tensor update); `nn.named[spec, theta]` gives the parameters back by
@@ -139,17 +139,75 @@ are the state dict both ways, so a model PyTorch trained runs in pie on
 its own weights (`held_safetensors.co`: a model torch made and saved, run
 in pie, is within 1e-15 of torch's answer).
 
+## Windows: convolutions, poolings, paddings, resamplings
+
+A convolution, a pooling, a padding, a fold and a resampling each read
+their input at positions. `nn.windows` computes the positions as tensors
+of whole numbers, in the order PyTorch's kernels read them, and the layer
+is a gather and then a matrix product or a reduction:
+
+- a convolution (1, 2 and 3 spatial axes; stride, padding, dilation,
+  groups) gathers each window's numbers as a column (im2col, `F.unfold`)
+  and multiplies the columns by the weight;
+- a transposed convolution multiplies each input position by the weight
+  and adds the products into the output positions they reach (col2im,
+  `F.fold`), in the order PyTorch adds them;
+- a pooling reduces each window: its largest number, its mean (with
+  `ceil_mode`, `count_include_pad` and `divisor_override`), its Lp norm,
+  or PyTorch's adaptive windows;
+- a padding (constant, reflection, replication, circular) reads the
+  position each output number copies;
+- `F.interpolate` reads, for 'nearest' and 'nearest-exact', the source
+  position PyTorch computes in single precision (`nn.single` rounds a
+  float64 to float32 as torch's float arithmetic does), and for 'linear',
+  'bilinear' and 'trilinear' weighs the two numbers about it along each
+  axis, the corners nested as PyTorch nests them; 'area' is adaptive
+  average pooling. 'bicubic' is not there yet.
+
+A position that reads no number of the input, padding or a window past
+the input's end, is the input's length: the one number a layer appends
+after the input (0 for a convolution, −∞ for a max pooling, a constant
+pad's value). `grad` differentiates a gather as it does any gather, so no
+layer over windows needs anything of its own in `grad`: the gradient goes
+back to the positions read, added where windows overlap.
+
+## Recurrent layers
+
+`nn.rnn`, `nn.lstm` and `nn.gru` are PyTorch's: `num_layers` layers, each
+over the one before's output, both ways where `bidirectional`, dropout
+between the layers in training, batch-first or not. Their parameters are
+named, laid and drawn as PyTorch's (`weight_ih_l0`, …, `_reverse` for the
+other direction; each uniform within ±1/√hidden), so a seeded pie layer
+starts from torch's numbers. A layer is a loop over the steps, which
+`grad` runs in order; a step is the functional cell (`F.rnn_tanh_cell`,
+`F.rnn_relu_cell`, `F.lstm_cell`, `F.gru_cell`), the gates computed as
+PyTorch computes them. `nn.forward` answers the output, and
+`nn.recurrent[layer, theta, x, h0, c0]` answers the output with the last
+hidden and cell states (`output, (h_n, c_n) = lstm(x, (h0, c0))`).
+`held_spatial.co` holds every convolution, pooling, padding, resampling and
+recurrent layer to PyTorch, value and gradients, to 1e-12.
+
 ## What crow had to grow
 
-`grad` reads a tensor's numbers only through the operations on its list.
-To build every layer over one vector, crow's `grad` differentiates `take`
-(numbers at positions, the gather under an embedding, a convolution's
-patches, a pooling window, a layer's slice of `theta`) — its backward
-spreads the gradient back to the positions, adding where a position is
-taken twice. A convolution is then `take` (im2col) and `*`; pooling is
-`take` and `max` along an axis; attention's heads are takes of the
-projections; a recurrent layer is a loop over the steps, which `grad`
-runs in order.
+`grad` reads a tensor's numbers only through the operations on its list,
+and pie's layers needed more of them than crow had. What it could not
+differentiate was added to `grad` in crow (pie has no tape of its own):
+
+- a tensor read at a tensor of positions (`v[positions]`, the gather
+  under an embedding, a convolution's columns, a pooling's windows, a
+  padding), its backward adding the gradient back where a position is read
+  twice; a mask and `where`'s sides; `log1p` and `expm1`;
+- a collecting loop, run in order, and a list or a record holding traced
+  tensors (a recurrent layer's steps and its state), lists of lists among
+  them; `stack` of traced tensors along an axis (`torch.stack`), and a list
+  of traced numbers made a tensor;
+- what carries no derivative meets any builtin inside the function
+  differentiated: a table of positions built from a tensor's sizes, a
+  `str` of a size, a draw;
+- a value that can fail holds its traced number, as a size read from
+  parsed text does in the spatial check, and `log` prints a traced value.
+
+Each is a parity program in crow, in both modes (crow's parity 490–519).
 
 ## Held to PyTorch
 

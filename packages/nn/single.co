@@ -1,0 +1,15 @@
+--- `use nn.single`: a float64 rounded to single precision (float32), to
+--- the nearest and ties to even — where PyTorch's kernels compute in float
+--- (the source positions F.interpolate's nearest modes read)
+use sys
+
+--- of[x]: x rounded to the nearest float32
+fn of[x]
+    xs = push[[], x]
+    return sys.float_values[sys.float_bytes[xs, 4, true], 0, 1, 4, true][0]
+
+test a_double_rounds_to_the_nearest_single[]
+    of[1.0] eq 1.0
+    of[0.1] eq 0.100000001490116119384765625
+    of[16777217.0] eq 16777216.0
+    of[16777219.0] eq 16777220.0
