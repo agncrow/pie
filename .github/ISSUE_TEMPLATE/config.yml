@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Pull requests
+    url: https://github.com/agncrow/pie/blob/main/CONTRIBUTING.md
+    about: Pie takes no pull requests during the alpha; CONTRIBUTING.md says what is welcome instead.

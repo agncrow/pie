@@ -9,6 +9,13 @@ regression, graphs and retrieval beside them. Every answer is the same in
 `crow run -i` and `crow run`, and each package is held to the library it
 follows: PyTorch in float64, scikit-learn, scipy, networkx, faiss.
 
+> **Alpha.** Pie is open source under the MIT or Apache-2.0 licence, at
+> your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)).
+> It runs on a crow newer than 0.8.2: crow's next release carries the
+> fixes Pie's packages need, and Pie's first tag, the `v0.1.0` below,
+> comes with it. Pie takes no pull requests during the alpha, and bug
+> reports are welcome in Issues ([CONTRIBUTING](CONTRIBUTING.md)).
+
 | Package | What it is |
 |---|---|
 | [`packages/nn`](packages/nn) | activations, losses, layers (linear, convolutions, poolings, paddings, resamplings, RNN/LSTM/GRU, attention, transformers, norms, embeddings, dropouts), modules, initialisers, optimisers and their schedules — PyTorch's `torch.nn`, `torch.nn.functional`, `torch.nn.init` and `torch.optim` |
@@ -66,5 +73,9 @@ times faster there; a small model trains faster on the CPU
 [docs/pie-design.md](docs/pie-design.md) says where the line with crow
 lies and why a model is one parameter vector.
 
-Pie is source-available under the Business Source License 1.1
-([LICENSING.md](LICENSING.md) says what that means in plain words).
+## Licence
+
+Pie is licensed under either of the MIT licence ([LICENSE-MIT](LICENSE-MIT))
+or the Apache licence, version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at
+your option, as Crow is. Each package carries both files, since `crow
+install` copies a package's folder alone.
