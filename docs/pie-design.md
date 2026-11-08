@@ -31,8 +31,7 @@ did.
 
 | Package | What it is | Held to |
 |---|---|---|
-| `nn` | tensors' activations, losses and layers; modules, the model as one parameter vector, initialisers, the functional forms; `nn.optim` (SGD, Adam, AdamW, Adamax, NAdam, RAdam, RMSprop, Adagrad, Adadelta, ASGD, Rprop) and `nn.lr_scheduler`; gradient clipping | PyTorch (float64) |
-| `data` | datasets of tensors or frames, batches, seeded shuffles, splits | PyTorch's DataLoader order, given the order |
+| `nn` | tensors' activations, losses and layers; modules, the model as one parameter vector, initialisers (`nn.init`), the functional forms; `nn.optim` (SGD, Adam, AdamW, Adamax, NAdam, RAdam, RMSprop, Adagrad, Adadelta, ASGD, Rprop) and `nn.lr_scheduler`; gradient clipping; torch's generator (`nn.rng`); loaders, samplers and splits (`nn.data`); weights saved and loaded as safetensors (`nn.safetensors`) | PyTorch (float64), and the safetensors library byte for byte |
 | `stats` | descriptive statistics, correlation, tests, fits | scipy |
 | `models` | the classical models, metrics, cross-validation | scikit-learn |
 | `optimize` | scalar and multivariate minimisers, roots | scipy.optimize |
@@ -89,6 +88,56 @@ with, so its answer has the right shape but no rank a type states: state
 it before indexing it, comparing it or handing it to a function that has
 copies for several ranks (`reshape[y, n, k]`, or `flatten[y]` for a
 vector), as `held_models.co` does. A loss takes it as it is.
+
+## Random numbers are torch's
+
+A seed in PyTorch names numbers: `torch.manual_seed(0)` and then
+`nn.Linear(3, 4)` is one weight matrix on every machine. Pie draws from
+the same generator, so a seed names the same numbers in pie. `nn.rng` is
+torch's CPU generator written in Crow: a Mersenne Twister (MT19937)
+seeded as torch seeds it, a 64-bit draw made of two 32-bit words, and
+each distribution made from them as ATen makes it — a uniform double from
+53 bits as `fma(u, b − a, a)`; normals by Box–Muller, one pair at a time
+below sixteen numbers (the second of a pair kept in the generator for the
+next draw, as torch keeps it) and sixteen at a time from sixteen on;
+`randperm` by torch's swaps; `randint`, `bernoulli`, `exponential` and
+`multinomial` as ATen draws them. `reference/rng_reference.py` writes the
+model of the generator, checks it against torch, and writes what
+`held_rng.co` holds pie to: every int and every float the same.
+
+A generator is a value: a draw takes one and answers its numbers beside
+the generator moved past them (`rng.Floats[values, generator]`), so what a
+program draws is decided by what it hands each draw, in both modes alike.
+`nn.parameters[model, g]` draws a model's parameters as its PyTorch
+modules draw them when they are made — a linear layer's weight by
+kaiming's bound and then its bias, an embedding's normals, a norm's ones
+and zeros — so a pie model starts from the numbers a PyTorch model starts
+from after `torch.manual_seed(s)`, in float64
+(`torch.set_default_dtype(torch.float64)`). A float32 model draws
+float32's numbers (24 bits for a uniform, single precision's functions for
+a normal); pie holds float64, so a float32 model's weights come in
+through safetensors instead.
+
+A DataLoader draws too — a base seed for its workers at every epoch, then
+its sampler's order — and which generator it draws from depends on what
+it was handed: the loader's own (which the sampler `shuffle` made
+shares), a sampler's own, or the process's (a random sampler through a
+generator seeded from it). `nn.data` follows each path, so a seeded pie
+loader hands out PyTorch's batches in PyTorch's order, epoch after epoch
+(`held_data.co`). An epoch answers its batches as positions; `data.rows`
+gathers a tensor's rows at them.
+
+## Weights in and out
+
+`nn.safetensors` reads and writes the format PyTorch models are shared in
+(Hugging Face's): a file pie saves is the file `safetensors.torch` writes
+of the same tensors, byte for byte — in F64, F32, F16, BF16 or I64, each
+number rounded as torch's `.to(dtype)` rounds a float64 (half precision at
+once, bfloat16 through single precision) — and pie loads every dtype the
+format has. `nn.state[model, theta]` and `nn.from_state[model, state]`
+are the state dict both ways, so a model PyTorch trained runs in pie on
+its own weights (`held_safetensors.co`: a model torch made and saved, run
+in pie, is within 1e-15 of torch's answer).
 
 ## What crow had to grow
 

@@ -1,20 +1,20 @@
 --- pie's nn at work, PyTorch's way: a model of layers whose parameters are
 --- one tensor, theta; the loss's gradient by `grad`; Adam's steps on a
---- cosine schedule. A small network learns XOR.
+--- cosine schedule. A small network learns XOR, from the parameters
+--- PyTorch's modules start from after torch.manual_seed(7).
 use math
 use nn
 use functional as F
-use optim
+use optim, rng
 use lr_scheduler as lrs
 
 fn loss[model, theta, x, y]
     return F.mse_loss[nn.forward[model, theta, x], y]
 
-seed[7]
 model = nn.sequential[[nn.linear[2, 8], nn.tanh[], nn.linear[8, 1]]]
 x = tensor[[[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]]]
 y = tensor[[[0.0], [1.0], [1.0], [0.0]]]
-opt = optim.adam[nn.parameters[model], lr = 0.05]
+opt = optim.adam[nn.parameters[model, rng.manual_seed[7]].values, lr = 0.05]
 opt = lrs.cosine_annealing_lr[opt, 300]
 first = loss[model, opt.theta, x, y]
 for k in range[300]

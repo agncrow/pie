@@ -1,0 +1,107 @@
+--- nn.data held to torch.utils.data (reference/rng_reference.py, torch
+--- 2.8): each case's batches, from the seeds the case names, are the
+--- reference's — the positions in each epoch's order and the sizes of its
+--- batches — and the process's generator draws on as torch's does after
+--- them.
+use math, frame
+use rng, data
+
+fn ints_of[name, got]
+    want = frame.load['packages/nn/reference/expected/rng_ints.csv']
+    for i in range[len[want]]
+        if str[want.case[i]] eq name
+            if join[got, ' '] eq str[want.values[i]]
+                return ''
+            return '`name`: `join[got, \' \']`'
+    return '`name`: no such case'
+
+--- the positions of `epochs` epochs, laid end to end, and the sizes of
+--- their batches; and the loader past them
+struct Drawn [order, sizes, loader]
+
+fn epochs[given, count]
+    order = []
+    sizes = []
+    at = given
+    for k in range[count]
+        ep = data.epoch[at]
+        for b in ep.batches
+            order = concat[order, b]
+            sizes = push[sizes, len[b]]
+        at = ep.loader
+    return Drawn[order, sizes, at]
+
+fn after[given]
+    return rng.randperm[data.process[given], 10].values
+
+fn sampler_of[name, own]
+    w10 = math.tensor[[0.5, 1.0, 0.25, 2.0, 1.5, 0.75, 0.1, 3.0, 1.25, 0.6]]
+    if name eq 'random_replacement'
+        return data.random_sampler[10, replacement = true, num_samples = 40, seed = own]
+    if name eq 'random_25'
+        return data.random_sampler[10, num_samples = 25, seed = own]
+    if name eq 'random_7'
+        return data.random_sampler[10, num_samples = 7, seed = own]
+    if name eq 'subset'
+        return data.subset_random_sampler[[5, 7, 9, 2], seed = own]
+    if name eq 'weighted'
+        return data.weighted_random_sampler[w10, 12, seed = own]
+    return data.weighted_random_sampler[w10, 6, replacement = false, seed = own]
+
+fn disagreements[]
+    out = []
+    sizes = [4, 3, 5]
+    drops = [false, true, true]
+    words = ['False', 'True', 'True']
+    for k in range[3]
+        d = epochs[data.loader[10, batch_size = sizes[k], shuffle = true, drop_last = drops[k], seed = 3], 3]
+        tag = '3_`sizes[k]`_`words[k]`'
+        out = push[out, ints_of['loader_`tag`', d.order]]
+        out = push[out, ints_of['loader_sizes_`tag`', d.sizes]]
+    d = epochs[data.drawing_from[data.loader[10, batch_size = 4, shuffle = true], rng.manual_seed[21]], 2]
+    out = push[out, ints_of['loader_process_21', d.order]]
+    out = push[out, ints_of['loader_process_21_after', after[d.loader]]]
+    d = epochs[data.drawing_from[data.loader[10, batch_size = 4], rng.manual_seed[22]], 2]
+    out = push[out, ints_of['loader_ordered_22_after', after[d.loader]]]
+    for name in ['random_replacement', 'random_25', 'random_7', 'subset', 'weighted', 'weighted_unreplaced']
+        d = epochs[data.sampled[data.loader[10, batch_size = 3, seed = 4], sampler_of[name, 9]], 2]
+        out = push[out, ints_of['sampler_`name`', d.order]]
+        out = push[out, ints_of['sampler_sizes_`name`', d.sizes]]
+        d = epochs[data.drawing_from[data.sampled[data.loader[10, batch_size = 3, seed = 4], sampler_of[name, -1]], rng.manual_seed[31]], 2]
+        out = push[out, ints_of['sampler_process_`name`', d.order]]
+        out = push[out, ints_of['sampler_process_`name`_after', after[d.loader]]]
+    names = ['counts', 'fractions', 'remainder', 'thirds', 'whole']
+    counts = [10, 10, 11, 10, 7]
+    third = 1.0 / 3.0
+    lengths = push[push[push[push[push[[], [3.0, 3.0, 4.0]], [0.5, 0.3, 0.2]], [0.25, 0.25, 0.5]], [third, third, third]], [1.0]]
+    for k in range[len[names]]
+        parts = data.random_split[rng.manual_seed[5], counts[k], lengths[k]].parts
+        laid = []
+        sizes = []
+        for p in parts
+            laid = concat[laid, p]
+            sizes = push[sizes, len[p]]
+        out = push[out, ints_of['split_`names[k]`', laid]]
+        out = push[out, ints_of['split_sizes_`names[k]`', sizes]]
+    wrong = []
+    for line in out
+        if line ne ''
+            wrong = push[wrong, line]
+    return wrong
+
+test the_batches_are_torchs[]
+    disagreements[] eq []
+
+--- rows gathers a tensor's items at a batch's positions, laid as the
+--- tensor is less its first axis; a split's counts take whole numbers
+test rows_are_the_items_at_the_positions[]
+    x = math.reshape[math.linspace[0, 23, 24], 6, 2, 2]
+    b = data.rows[x, [4, 1]]
+    b.shape eq [2, 2, 2]
+    math.flatten[b] eq math.tensor[[16.0, 17.0, 18.0, 19.0, 4.0, 5.0, 6.0, 7.0]]
+    y = math.tensor[[10.0, 11.0, 12.0, 13.0, 14.0, 15.0]]
+    math.flatten[data.rows[y, [5, 0, 5]]] eq math.tensor[[15.0, 10.0, 15.0]]
+    len[data.random_split[rng.manual_seed[5], 10, [3, 3, 4]].parts] eq 3
+    data.length[data.loader[10, batch_size = 4]] eq 3
+    data.length[data.loader[10, batch_size = 4, drop_last = true]] eq 2
+    data.through[[7, 8, 9], [2, 0]] eq [9, 7]

@@ -1,0 +1,283 @@
+--- `use nn.data`: PyTorch's torch.utils.data — loaders, samplers and
+--- splits — drawing from torch's generator (`nn.rng`) as PyTorch draws,
+--- so a seeded loader hands out the batches PyTorch's does, epoch after
+--- epoch. A loader answers each epoch's batches as the positions of the
+--- items they hold; `rows` gathers a tensor's items at them (a
+--- TensorDataset's batch is its tensors' rows at the batch's positions):
+---
+---     loader = data.loader[x.shape[0], batch_size = 32, shuffle = true, seed = 0]
+---     for k in range[10]
+---         ep = data.epoch[loader]
+---         loader = ep.loader
+---         for b in ep.batches
+---             xb = data.rows[x, b]
+---             yb = data.rows[y, b]
+---
+--- A dataset is the count of its items and whatever the program reads at
+--- a position: a Subset is a list of positions (`data.through[subset, b]`
+--- reads a batch of it), a ConcatDataset the tensors joined along their
+--- first axis.
+---
+--- Where a loader or a sampler is given no seed, PyTorch draws from its
+--- process's generator; a pie loader holds that generator (`process`),
+--- torch's default seed until `data.drawing_from` hands it one — a program
+--- that called torch.manual_seed(s) and drew from it, `rng.manual_seed[s]`
+--- moved past what it drew — and an epoch answers it moved.
+use math as m
+use shapes
+use rng
+
+--- a sampler: how it orders a dataset's positions (`order_by`:
+--- sequential, random, subset or weighted), what it orders them by, and
+--- where it draws from — its own generator, seeded (`seeded`), or the
+--- loader's or the process's (torch's generator=None)
+struct Sampler [order_by, count, indices, weights, replacement, num_samples, seeded, generator]
+
+--- a loader: its sampler, how many positions a batch holds, whether a
+--- last short batch is dropped, whether the loader's sampler is the one
+--- `shuffle` made, its generator where it has its own (`seeded`) and the
+--- process's
+struct Loader [sampler, batch_size, drop_last, shuffled, seeded, generator, process]
+
+--- an epoch's batches, each the positions it holds, and the loader past it
+struct Epoch [batches, loader]
+
+--- a pass of a sampler: the positions it gave and the generators past it
+struct Pass [order, sampler, generator, process]
+
+--- random_split's parts, each the positions it holds, and the generator
+--- past them
+struct Split [parts, generator]
+
+fn _sampler[kind, count, indices, weights, replacement, num_samples, seed]
+    g = rng.default_generator[]
+    if seed gte 0
+        g = rng.manual_seed[seed]
+    return Sampler[kind, count, indices, weights, replacement, num_samples, seed gte 0, g]
+
+--- sequential_sampler[count]: the positions in order (SequentialSampler)
+fn sequential_sampler[count]
+    return _sampler['sequential', count, [], m.zeros[0], false, count, -1]
+
+--- random_sampler[count, replacement, num_samples, seed]: the positions
+--- in a random order (RandomSampler): a permutation of them, or
+--- num_samples of them, by whole permutations and a part of one; with
+--- replacement, num_samples positions drawn alike (0 is all of them)
+fn random_sampler[count, replacement = false, num_samples = 0, seed = -1]
+    n = num_samples
+    if n eq 0
+        n = count
+    if n lt 0
+        halt['num_samples should be a positive integer value, but got num_samples=`num_samples`']
+    return _sampler['random', count, [], m.zeros[0], replacement, n, seed]
+
+--- subset_random_sampler[indices, seed]: the positions given, in a random
+--- order (SubsetRandomSampler)
+fn subset_random_sampler[indices, seed = -1]
+    return _sampler['subset', len[indices], indices, m.zeros[0], false, len[indices], seed]
+
+--- weighted_random_sampler[weights, num_samples, replacement, seed]:
+--- num_samples positions drawn by their weights (WeightedRandomSampler,
+--- through torch.multinomial)
+fn weighted_random_sampler[weights, num_samples, replacement = true, seed = -1]
+    w = m.flatten[weights] + 0.0
+    if num_samples lt 1
+        halt['num_samples should be a positive integer value, but got num_samples=`num_samples`']
+    return _sampler['weighted', len[w], [], w, replacement, num_samples, seed]
+
+--- loader[count, batch_size, shuffle, drop_last, seed]: a DataLoader over
+--- `count` items: in order, or shuffled where `shuffle` says, in batches of
+--- batch_size, the last short one dropped where drop_last says; seed is
+--- the generator handed to it (`generator=torch.Generator().manual_seed(seed)`),
+--- and without one it draws from the process's generator
+fn loader[count, batch_size = 1, shuffle = false, drop_last = false, seed = -1]
+    if batch_size lt 1
+        halt['batch_size should be a positive integer value, but got batch_size=`batch_size`']
+    s = sequential_sampler[count]
+    if shuffle
+        s = random_sampler[count]
+    g = rng.default_generator[]
+    if seed gte 0
+        g = rng.manual_seed[seed]
+    return Loader[s, batch_size, drop_last, shuffle, seed gte 0, g, rng.default_generator[]]
+
+--- sampled[loader, sampler]: the loader drawing its positions from the
+--- sampler (DataLoader's `sampler=`, which shuffle cannot be beside)
+fn sampled[given, sampler]
+    if given.shuffled
+        halt['sampler option is mutually exclusive with shuffle']
+    out = given
+    out.sampler = sampler
+    return out
+
+--- drawing_from[loader, g]: the loader with g as the process's generator
+fn drawing_from[given, g]
+    out = given
+    out.process = g
+    return out
+
+--- process[loader]: the process's generator as the loader's epochs leave
+--- it, for a program that goes on drawing from it
+fn process[given]
+    return given.process
+
+--- length[loader]: how many batches an epoch holds (len(DataLoader))
+fn length[given]
+    n = given.sampler.num_samples
+    if given.drop_last
+        return n / given.batch_size
+    return (n + given.batch_size - 1) / given.batch_size
+
+--- epoch[loader]: an epoch's batches and the loader past them: the base
+--- seed PyTorch draws for its workers first — from the loader's generator,
+--- or the process's — then the sampler's pass, cut into batches
+fn epoch[given]
+    lg = given.generator
+    pg = given.process
+    if given.seeded
+        lg = rng.random_int64[lg].generator
+    else
+        pg = rng.random_int64[pg].generator
+    p = _pass[given.sampler, given.shuffled and given.seeded, lg, pg]
+    out = given
+    out.sampler = p.sampler
+    out.generator = p.generator
+    out.process = p.process
+    return Epoch[_batched[p.order, given.batch_size, given.drop_last], out]
+
+--- the positions cut into batches (BatchSampler)
+fn _batched[order, size, drop_last]
+    out = []
+    at = 0
+    n = len[order]
+    while at lt n
+        if at + size gt n and drop_last
+            return out
+        out = push[out, slice[order, at, min[at + size, n]]]
+        at = at + size
+    return out
+
+--- sample[sampler, process]: one pass of a sampler on its own (iterating
+--- it): its positions, and the sampler and process's generator past it
+fn sample[s, g]
+    return _pass[s, false, s.generator, g]
+
+--- a sampler's pass. `shared` says the sampler draws from the loader's
+--- generator (`lg`): the one shuffle made in a loader handed a generator;
+--- a sampler seeded draws from its own; any other draws from the
+--- process's (`pg`), a random sampler through a generator seeded from it
+fn _pass[s, shared, lg, pg]
+    if s.order_by eq 'sequential'
+        return Pass[range[s.count], s, lg, pg]
+    g = pg
+    if shared
+        g = lg
+    if s.seeded
+        g = s.generator
+    local = s.order_by eq 'random' and not shared and not s.seeded
+    if local
+        seeded = rng.random_int64[pg]
+        pg = seeded.generator
+        g = rng.manual_seed[seeded.values[0]]
+    drawn = _ordered[s, g]
+    moved = s
+    if s.seeded
+        moved.generator = drawn.generator
+    else
+        if shared
+            lg = drawn.generator
+        else
+            if not local
+                pg = drawn.generator
+    return Pass[drawn.values, moved, lg, pg]
+
+--- a sampler's positions drawn from g, and g past them
+fn _ordered[s, g]
+    if s.order_by eq 'subset'
+        perm = rng.randperm[g, len[s.indices]]
+        out = []
+        for i in perm.values
+            out = push[out, s.indices[i]]
+        return rng.Ints[out, perm.generator]
+    if s.order_by eq 'weighted'
+        return rng.multinomial[g, s.weights, s.num_samples, s.replacement]
+    n = s.count
+    if s.replacement
+        return rng.randint[g, 0, n, s.num_samples]
+    out = []
+    at = g
+    for k in range[s.num_samples / n]
+        perm = rng.randperm[at, n]
+        out = concat[out, perm.values]
+        at = perm.generator
+    rest = rng.randperm[at, n]
+    out = concat[out, slice[rest.values, 0, s.num_samples % n]]
+    return rng.Ints[out, rest.generator]
+
+--- random_split[g, count, lengths]: `count` positions in parts of the
+--- lengths given — counts, or fractions summing to 1, each part floor(count
+--- · fraction) and what is left one apiece from the first — by one
+--- permutation drawn from g (torch.utils.data.random_split)
+fn random_split[g, count, lengths]
+    sizes = _split_sizes[count, lengths]
+    total = 0
+    for k in sizes
+        total = total + k
+    if total ne count
+        halt['Sum of input lengths does not equal the length of the input dataset!']
+    perm = rng.randperm[g, count]
+    parts = []
+    at = 0
+    for k in sizes
+        parts = push[parts, slice[perm.values, at, at + k]]
+        at = at + k
+    return Split[parts, perm.generator]
+
+fn _split_sizes[count, lengths]
+    total = 0.0
+    for x in lengths
+        total = total + float[x]
+    out = []
+    --- fractions where they sum to 1 (math.isclose's 1e-9), as PyTorch reads them
+    if total lte 1.0 and total gte 0.999999999
+        for k in range[len[lengths]]
+            f = float[lengths[k]]
+            if f lt 0.0 or f gt 1.0
+                halt['Fraction at index `k` is not between 0 and 1']
+            out = push[out, floor[float[count] * f]]
+        given = 0
+        for k in out
+            given = given + k
+        for i in range[count - given]
+            j = i % len[out]
+            out[j] = out[j] + 1
+        return out
+    for x in lengths
+        out = push[out, int[x]]
+    return out
+
+--- through[positions, batch]: the positions of a subset a batch of it
+--- holds (Subset's indices read at the batch's)
+fn through[positions, batch]
+    out = []
+    for i in batch
+        out = push[out, positions[i]]
+    return out
+
+--- rows[t, positions]: the items of t at the positions, along its first
+--- axis, laid as t is less that axis (default_collate of a
+--- TensorDataset's items: a batch of t[i] for each position)
+fn rows[t, positions]
+    dims = t.shape
+    per = 1
+    sizes = [len[positions]]
+    for k in range[1, len[dims]]
+        per = per * dims[k]
+        sizes = push[sizes, dims[k]]
+    if per eq 1
+        return shapes.laid[m.flatten[t[positions]], sizes]
+    flat = m.flatten[t]
+    pieces = []
+    for i in positions
+        pieces = push[pieces, slice[flat, i * per, i * per + per]]
+    return shapes.laid[m.flatten[m.stack[pieces]], sizes]

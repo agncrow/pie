@@ -1,0 +1,8 @@
+--- nn.safetensors held to Hugging Face's safetensors library in both
+--- modes (held_safetensors.co's checks): the bytes of a state saved in
+--- F64, F32, F16, BF16 and I64, every dtype's numbers loaded, and a model
+--- PyTorch saved run in pie, compiled as interpreted
+use nn.held_safetensors
+log[held_safetensors.save_disagreements[]]
+log[held_safetensors.every_load_disagreement[]]
+log[held_safetensors.model_gap[] lt 0.000000000000001]

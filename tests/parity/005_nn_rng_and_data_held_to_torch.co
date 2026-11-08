@@ -1,0 +1,10 @@
+--- nn.rng and nn.data held to torch's CPU generator in both modes
+--- (held_rng.co's and held_data.co's checks): the words, the
+--- permutations, the ints, the uniforms, the normals cached and filled,
+--- Bernoulli, exponential and multinomial draws, and the loaders', the
+--- samplers' and random_split's positions, compiled as interpreted
+use nn.held_rng
+use nn.held_data
+log[held_rng.int_disagreements[]]
+log[held_rng.float_disagreements[]]
+log[held_data.disagreements[]]

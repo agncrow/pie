@@ -1,0 +1,282 @@
+--- `use nn.rng`: PyTorch's random numbers on the CPU, number for number —
+--- the Mersenne Twister a torch.Generator holds (MT19937, seeded as
+--- `torch.Generator().manual_seed(s)` seeds it) and the draws torch makes
+--- of it: randperm, randint, a 64-bit int's random_, and rand, uniform_,
+--- normal_, bernoulli_ and exponential_ of float64 numbers, multinomial.
+--- A generator is a value: each draw answers its numbers and the
+--- generator moved past them (`Ints`, `Floats`), as a program hands a
+--- torch.Generator to each call that draws from it.
+---
+--- Held to torch 2.8 (reference/rng_reference.py): the words, the
+--- permutations, the ints and the uniforms are torch's exactly; a normal
+--- is too, but for one sine in about 1,500 on macOS, whose PyTorch fuses a
+--- sine and a cosine into one call (`__sincos_stret`) that answers that
+--- sine's last digit differently from `sin`.
+use math as m
+use bits
+
+--- the generator: its 624 words, how many of them are drawn, and the
+--- second number of the last Box–Muller pair where one is held for the
+--- next normal, as PyTorch holds it
+struct Generator [words, at, cached, held]
+
+--- numbers drawn, and the generator past them: ints as a list, floats
+--- as a vector
+struct Ints [values, generator]
+struct Floats [values, generator]
+
+--- uniforms on [0, 1) as a list, for the draws made of them
+struct Units [values, generator]
+
+--- manual_seed[seed]: a generator seeded as torch.Generator().manual_seed
+--- seeds one (its low 32 bits)
+fn manual_seed[seed]
+    state = [bitand[seed, 4294967295]]
+    prev = state[0]
+    for j in range[1, 624]
+        prev = bitand[1812433253 * bitxor[prev, shift[prev, -30]] + j, 4294967295]
+        state = push[state, prev]
+    return Generator[state, 624, 0.0, false]
+
+--- default_generator[]: the generator of a process that seeds nothing,
+--- torch's default (torch.initial_seed() is 67280421310721)
+fn default_generator[]
+    return manual_seed[67280421310721]
+
+--- the next 624 words, as MT19937 twists them
+fn _twisted[given]
+    w = given
+    for k in range[624]
+        y = bitor[bitand[w[k], 2147483648], bitand[w[(k + 1) % 624], 2147483647]]
+        v = bitxor[w[(k + 397) % 624], shift[y, -1]]
+        if bitand[y, 1] eq 1
+            v = bitxor[v, 2567483615]
+        w[k] = v
+    return w
+
+--- a word as MT19937 tempers it
+fn _tempered[y0]
+    y = bitxor[y0, shift[y0, -11]]
+    y = bitxor[y, bitand[shift[y, 7], 2636928640]]
+    y = bitxor[y, bitand[shift[y, 15], 4022730752]]
+    return bitxor[y, shift[y, -18]]
+
+--- words[g, n]: the next n 32-bit words (each torch's `random()`)
+fn words[g, n]
+    state = g.words
+    at = g.at
+    out = []
+    for i in range[n]
+        if at gte 624
+            state = _twisted[state]
+            at = 0
+        out = push[out, _tempered[state[at]]]
+        at = at + 1
+    moved = g
+    moved.words = state
+    moved.at = at
+    return Ints[out, moved]
+
+--- a 64-bit word's low 53 bits as a number in [0, 1), from its two
+--- halves (torch's uniform of a double: `(random64() & (2^53 − 1)) · 2^−53`)
+fn _unit[hi, lo]
+    return float[bitor[shift[bitand[hi, 2097151], 32], lo]] / 9007199254740992.0
+
+--- the numbers of n uniform draws in [0, 1), and the generator past them
+fn _units[g, n]
+    drawn = words[g, 2 * n]
+    w = drawn.values
+    out = []
+    for i in range[n]
+        out = push[out, _unit[w[2 * i], w[2 * i + 1]]]
+    return Units[out, drawn.generator]
+
+--- randperm[g, n]: 0 to n − 1 in torch.randperm's order (a swap of each
+--- place with one at or after it, by a word each)
+fn randperm[g, n]
+    order = []
+    for i in range[n]
+        order = push[order, i]
+    if n lt 2
+        return Ints[order, g]
+    drawn = words[g, n - 1]
+    w = drawn.values
+    for i in range[n - 1]
+        z = w[i] % (n - i)
+        keep = order[i]
+        order[i] = order[z + i]
+        order[z + i] = keep
+    return Ints[order, drawn.generator]
+
+--- randint[g, low, high, n]: n ints in [low, high), torch.randint's: a
+--- word each where the range is below 2^32, a 64-bit word past it
+fn randint[g, low, high, n]
+    span = high - low
+    if span lt 1
+        halt['random_ expects \'from\' to be less than \'to\', but got from=`low` >= to=`high`']
+    if span lt 4294967296
+        drawn = words[g, n]
+        out = []
+        for x in drawn.values
+            out = push[out, x % span + low]
+        return Ints[out, drawn.generator]
+    drawn = words[g, 2 * n]
+    w = drawn.values
+    out = []
+    for i in range[n]
+        out = push[out, (w[2 * i] * 4294967296 + w[2 * i + 1]) % span + low]
+    return Ints[out, drawn.generator]
+
+--- random_int64[g]: a 64-bit int's random_ (torch.empty((), dtype=
+--- torch.int64).random_(generator=g)): a 64-bit word less its top bit —
+--- the seed a DataLoader draws for each epoch
+fn random_int64[g]
+    drawn = words[g, 2]
+    w = drawn.values
+    return Ints[[bitand[w[0], 2147483647] * 4294967296 + w[1]], drawn.generator]
+
+--- uniform[g, n, a, b]: n numbers uniform on [a, b) (uniform_(a, b) of
+--- float64: u · (b − a) + a, the multiply and the add one rounding, as
+--- PyTorch's compiled kernel fuses them); `uniform[g, n]` is torch.rand's
+--- n numbers (`rand` is Crow's own builtin)
+fn uniform[g, n, a = 0.0, b = 1.0]
+    drawn = _units[g, n]
+    out = []
+    for u in drawn.values
+        out = push[out, m.fma[u, b - a, a]]
+    return Floats[m.tensor[out], drawn.generator]
+
+--- normal[g, n, mu, sigma]: n normal numbers of mean mu and standard
+--- deviation sigma (normal_ of float64): sixteen at a time where there are
+--- 16 or more, a Box–Muller pair from each place and the place eight
+--- after it, the last sixteen drawn again where n is no multiple of 16;
+--- fewer one at a time, each pair's second number held in the generator
+--- for the next
+fn normal[g, n, mu = 0.0, sigma = 1.0]
+    if n gte 16
+        return _filled[g, n, mu, sigma]
+    if n lt 1
+        return Floats[m.zeros[0], g]
+    out = []
+    if g.held
+        out = push[out, m.fma[g.cached, sigma, mu]]
+    pairs = (n - len[out] + 1) / 2
+    drawn = words[g, 4 * pairs]
+    w = drawn.values
+    cached = 0.0
+    held = false
+    for p in range[pairs]
+        u1 = _unit[w[4 * p], w[4 * p + 1]]
+        u2 = _unit[w[4 * p + 2], w[4 * p + 3]]
+        r = sqrt[-2.0 * m.log1p[-u2]]
+        theta = 2.0 * m.pi * u1
+        out = push[out, m.fma[r * m.cos[theta], sigma, mu]]
+        s = r * m.sin[theta]
+        if len[out] lt n
+            out = push[out, m.fma[s, sigma, mu]]
+        else
+            cached = s
+            held = true
+    moved = drawn.generator
+    moved.cached = cached
+    moved.held = held
+    return Floats[m.tensor[out], moved]
+
+fn _filled[g, n, mu, sigma]
+    drawn = _units[g, n]
+    data = drawn.values
+    i = 0
+    while i + 16 lte n
+        data = _sixteen[data, i, mu, sigma]
+        i = i + 16
+    moved = drawn.generator
+    if n % 16 ne 0
+        tail = _units[moved, 16]
+        moved = tail.generator
+        for j in range[16]
+            data[n - 16 + j] = tail.values[j]
+        data = _sixteen[data, n - 16, mu, sigma]
+    return Floats[m.tensor[data], moved]
+
+--- sixteen uniforms from `at` as eight Box–Muller pairs, in place
+fn _sixteen[given, at, mu, sigma]
+    out = given
+    for j in range[8]
+        u1 = 1.0 - out[at + j]
+        u2 = out[at + j + 8]
+        radius = sqrt[-2.0 * m.ln[u1]]
+        theta = 2.0 * m.pi * u2
+        out[at + j] = m.fma[radius * m.cos[theta], sigma, mu]
+        out[at + j + 8] = m.fma[radius * m.sin[theta], sigma, mu]
+    return out
+
+--- bernoulli[g, n, p]: n draws of 1 with probability p, else 0
+--- (bernoulli_(p) of float64: a uniform below p)
+fn bernoulli[g, n, p = 0.5]
+    drawn = _units[g, n]
+    out = []
+    for u in drawn.values
+        if u lt p
+            out = push[out, 1.0]
+        else
+            out = push[out, 0.0]
+    return Floats[m.tensor[out], drawn.generator]
+
+--- exponential[g, n, lambd]: n draws of rate lambd (exponential_ of
+--- float64: −1/λ · log1p(−u))
+fn exponential[g, n, lambd = 1.0]
+    drawn = _units[g, n]
+    out = []
+    for u in drawn.values
+        out = push[out, -1.0 / lambd * m.log1p[-u]]
+    return Floats[m.tensor[out], drawn.generator]
+
+--- multinomial[g, weights, n, replacement]: n classes drawn by their
+--- weights (torch.multinomial of a vector): with replacement, a uniform
+--- each placed in the weights' cumulative sums, each divided by the
+--- total, the last held at 1; without (or for one draw), the weights over
+--- exponential draws, the n largest, largest first
+fn multinomial[g, weights, n, replacement = false]
+    w = m.flatten[weights]
+    k = len[w]
+    if k lt 1
+        halt['cannot sample from an empty probability distribution']
+    if not replacement and n gt k
+        halt['cannot sample n_sample > prob_dist.size(-1) samples without replacement']
+    if replacement and n ne 1
+        total = 0.0
+        sums = []
+        for x in w
+            total = total + x
+            sums = push[sums, total]
+        cdf = []
+        for x in sums
+            cdf = push[cdf, x / total]
+        cdf[k - 1] = 1.0
+        drawn = _units[g, n]
+        out = []
+        for u in drawn.values
+            lo = 0
+            hi = k
+            while hi - lo gt 0
+                mid = lo + (hi - lo) / 2
+                if cdf[mid] lt u
+                    lo = mid + 1
+                else
+                    hi = mid
+            out = push[out, lo]
+        return Ints[out, drawn.generator]
+    q = exponential[g, k, 1.0]
+    ratio = w ./ q.values
+    out = []
+    taken = []
+    for i in range[k]
+        taken = push[taken, false]
+    for r in range[n]
+        best = -1
+        for i in range[k]
+            if not taken[i] and (best lt 0 or ratio[i] gt ratio[best])
+                best = i
+        taken[best] = true
+        out = push[out, best]
+    return Ints[out, q.generator]

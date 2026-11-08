@@ -2,9 +2,10 @@
 --- function named as PyTorch's class, in lowercase — `nn.linear[4, 8]` is
 --- nn.Linear(4, 8) — and a model is a layer of parts (`nn.sequential`,
 --- `nn.module`). Every parameter of a model is one flat tensor, theta:
---- `nn.parameters[model]` draws PyTorch's default values from the seeded
---- generator, laid as PyTorch's state_dict lays them (each layer's own
---- first, then its parts'), and `nn.forward[model, theta, x]` runs the
+--- `nn.parameters[model, g]` draws PyTorch's default values from a torch
+--- generator (`nn.rng`) as PyTorch's modules draw them, laid as PyTorch's
+--- state_dict lays them (each layer's own first, then its parts'), and
+--- `nn.forward[model, theta, x]` runs the
 --- model reading each layer's parameters from theta, so
 --- `grad[loss][model, theta, batch]` differentiates every parameter at once
 --- (the model and a batch, records, are constants of the run). A layer's
@@ -13,7 +14,7 @@
 --- PyTorch's forward pass moves them in training. The functions a model is
 --- written in are `nn.functional`'s.
 use math as m
-use functional, shapes
+use functional, shapes, rng
 
 --- a layer: its form (`linear`, `relu`, `sequential`, …), its name in its
 --- parent, where its parameters begin in theta, how many are its own and
@@ -242,7 +243,11 @@ fn sequential[parts]
     return _container['sequential', ordered]
 
 --- module[parts]: parts by name, a map of layers, for a forward function
---- the program writes (nn.Module's attributes): nn.part finds each
+--- the program writes (nn.Module's attributes): nn.part finds each. The
+--- parts are laid, and drawn, in the order of their names (a map's keys),
+--- where PyTorch's are in the order its constructor made them: a module
+--- whose parts' names sort in the order PyTorch's are made starts from
+--- PyTorch's numbers
 fn module[parts]
     ordered = []
     for k in keys[parts]
@@ -497,40 +502,63 @@ fn with_param[model, theta, path, value]
 
 --- the parameters --------------------------------------------------------------
 
---- parameters[model]: theta, each parameter drawn as PyTorch draws it by default
---- from the seeded generator: a linear layer's weight and bias uniform
---- within ±1/√ins (kaiming_uniform with a = √5), a bilinear's within
---- ±1/√in1, an embedding's normal, a normalization's weight 1 and bias 0,
---- a prelu's its init
-fn parameters[model]
-    out = _own_drawn[model]
+--- parameters[model, g]: theta, each parameter drawn from the generator g
+--- as PyTorch's module draws it by default when it is made (in float64,
+--- torch.set_default_dtype(torch.float64)), the layers in order: a linear
+--- layer's weight kaiming_uniform with a = √5 (within ±1/√ins, by
+--- PyTorch's own arithmetic of the bound), then its bias uniform within
+--- ±1/√ins; a bilinear's both within ±1/√in1; an embedding's normal; a
+--- normalization's weight 1 and bias 0; a prelu's its init. It answers
+--- theta beside g past the draws (`rng.Floats`)
+fn parameters[model, g]
+    own = _own_drawn[model, g]
+    out = own.values
+    at = own.generator
     for p in model.parts
-        out = concat[out, parameters[p]]
+        d = parameters[p, at]
+        out = concat[out, d.values]
+        at = d.generator
     --- (a vector, said so: the parts' answers come from this function
     --- itself, which no rank is known of until it is typed)
-    return m.flatten[out]
+    return rng.Floats[m.flatten[out], at]
 
-fn _own_drawn[layer]
+--- the kaiming_uniform bound PyTorch's linear and convolution layers
+--- start their weights within: √3 · gain / √fan_in, the gain a leaky
+--- relu's of slope √5, in PyTorch's order of operations
+fn _kaiming_bound[fan_in]
+    a = sqrt[5.0]
+    gain = sqrt[2.0 / (1.0 + a * a)]
+    return sqrt[3.0] * (gain / sqrt[float[fan_in]])
+
+fn _own_drawn[layer, g]
     f = layer.form
     if f eq 'linear'
         ins = layer.ints[0]
         outs = layer.ints[1]
-        bound = 1.0 / sqrt[float[ins]]
-        w = m.uniform[-bound, bound, outs * ins]
+        bound = _kaiming_bound[ins]
+        w = rng.uniform[g, outs * ins, -bound, bound]
         if layer.flags[0]
-            return concat[w, m.uniform[-bound, bound, outs]]
+            b = 1.0 / sqrt[float[ins]]
+            bias = rng.uniform[w.generator, outs, -b, b]
+            return rng.Floats[concat[w.values, bias.values], bias.generator]
         return w
     if f eq 'bilinear'
         in1 = layer.ints[0]
         in2 = layer.ints[1]
         outs = layer.ints[2]
         bound = 1.0 / sqrt[float[in1]]
-        w = m.uniform[-bound, bound, outs * in1 * in2]
+        w = rng.uniform[g, outs * in1 * in2, -bound, bound]
         if layer.flags[0]
-            return concat[w, m.uniform[-bound, bound, outs]]
+            bias = rng.uniform[w.generator, outs, -bound, bound]
+            return rng.Floats[concat[w.values, bias.values], bias.generator]
         return w
     if f eq 'embedding'
-        return m.randn[layer.own]
+        return rng.normal[g, layer.own]
+    return rng.Floats[_own_fixed[layer], g]
+
+--- a layer's own parameters that no draw makes
+fn _own_fixed[layer]
+    f = layer.form
     if f eq 'layer_norm'
         n = shapes.product[layer.ints]
         if layer.own eq 2 * n

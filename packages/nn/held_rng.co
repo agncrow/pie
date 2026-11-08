@@ -1,0 +1,185 @@
+--- nn.rng held to torch's CPU generator (reference/rng_reference.py,
+--- torch 2.8): each case's draws, from the seed the case names, are the
+--- reference's — the ints exactly, the floats to one unit in the last
+--- place (a normal and an exponential go through libm, whose last digit
+--- two platforms may round apart; on this one they agree exactly). So are
+--- nn.init's draws and the parameters a model starts from, which PyTorch's
+--- modules draw as they are made: exactly, or to the ulp libm's, but a
+--- truncated normal (erfinv's distance, 1e-11) and an orthogonal matrix
+--- (LAPACK's QR against faer's, 1e-12).
+use math, frame
+use nn
+use rng, init
+use held
+
+fn ints_of[name, got]
+    want = frame.load['packages/nn/reference/expected/rng_ints.csv']
+    for i in range[len[want]]
+        if str[want.case[i]] eq name
+            if join[got, ' '] eq str[want.values[i]]
+                return ''
+            return '`name`: `join[got, \' \']`'
+    return '`name`: no such case'
+
+--- the ints each case draws
+fn int_disagreements[]
+    out = []
+    seeds = [0, 42, 7, 7, 2147483653, 123456789, 1099511627783]
+    sizes = [10, 100, 1, 2, 1000, 3000, 50]
+    for k in range[len[seeds]]
+        out = push[out, ints_of['randperm_`seeds[k]`_`sizes[k]`', rng.randperm[rng.manual_seed[seeds[k]], sizes[k]].values]]
+    out = push[out, ints_of['randperm_default_10', rng.randperm[rng.default_generator[], 10].values]]
+    out = push[out, ints_of['randint_7_0_10', rng.randint[rng.manual_seed[7], 0, 10, 20].values]]
+    out = push[out, ints_of['randint_8_m3_4', rng.randint[rng.manual_seed[8], -3, 4, 2000].values]]
+    out = push[out, ints_of['randint_17_wide', rng.randint[rng.manual_seed[17], -5, 2 ^ 40, 6].values]]
+    out = push[out, ints_of['randint_17_2_32', rng.randint[rng.manual_seed[17], 3, 2 ^ 32 + 3, 6].values]]
+    g = rng.manual_seed[7]
+    three = []
+    for k in range[3]
+        drawn = rng.random_int64[g]
+        three = push[three, drawn.values[0]]
+        g = drawn.generator
+    out = push[out, ints_of['random_int64_7', three]]
+    w6 = math.tensor[[0.1, 0.2, 0.3, 0.4, 0.5, 0.05]]
+    out = push[out, ints_of['multinomial_29_4', rng.multinomial[rng.manual_seed[29], w6, 4].values]]
+    out = push[out, ints_of['multinomial_29_1r', rng.multinomial[rng.manual_seed[29], w6, 1, replacement = true].values]]
+    out = push[out, ints_of['multinomial_31_40r', rng.multinomial[rng.manual_seed[31], w6, 40, replacement = true].values]]
+    out = push[out, ints_of['multinomial_32_3', rng.multinomial[rng.manual_seed[32], math.tensor[[3.0, 0.0, 1.0]], 2].values]]
+    wrong = []
+    for line in out
+        if line ne ''
+            wrong = push[wrong, line]
+    return wrong
+
+test the_ints_are_torchs[]
+    int_disagreements[] eq []
+
+--- a float case's distance from the reference's row, in units of its
+--- numbers' last places
+fn ulps_apart[got, want]
+    if len[got] ne len[want]
+        return inf
+    far = 0.0
+    for i in range[len[got]]
+        d = abs[got[i] - want[i]]
+        if d gt 0.0
+            far = max[far, d / (abs[want[i]] * 0.0000000000000002220446049250313)]
+    return far
+
+fn floats_of[name, got, within]
+    gap = ulps_apart[got, held.expected['rng_`name`']]
+    if gap gt within
+        return '`name` `gap` ulps'
+    return ''
+
+--- normal draws of n numbers in turn from one generator, laid end to end
+fn normals[g, sizes]
+    out = math.zeros[0]
+    at = g
+    for n in sizes
+        drawn = rng.normal[at, n]
+        out = concat[out, drawn.values]
+        at = drawn.generator
+    return out
+
+--- one generator through draws of every kind, in turn
+fn mixed[]
+    g = rng.manual_seed[12]
+    a = rng.uniform[g, 3]
+    b = rng.randperm[a.generator, 10]
+    c = rng.normal[b.generator, 5]
+    d = rng.bernoulli[c.generator, 4]
+    one = rng.normal[d.generator, 1]
+    f = rng.randint[one.generator, 0, 100, 3]
+    perm = math.tensor[b.values] + 0.0
+    picks = math.tensor[f.values] + 0.0
+    return concat[a.values, perm, c.values, d.values, one.values, picks]
+
+fn float_disagreements[]
+    out = []
+    out = push[out, floats_of['rand_5_7', rng.uniform[rng.manual_seed[5], 7].values, 0.0]]
+    out = push[out, floats_of['uniform_11_100', rng.uniform[rng.manual_seed[11], 100, -2.0, 3.0].values, 0.0]]
+    out = push[out, floats_of['bernoulli_19_50', rng.bernoulli[rng.manual_seed[19], 50, 0.3].values, 0.0]]
+    out = push[out, floats_of['exponential_23_50', rng.exponential[rng.manual_seed[23], 50, 2.5].values, 1.0]]
+    seeds = [3, 3, 4, 9, 99]
+    sizes = [5, 16, 37, 1000, 15]
+    mus = [0.0, 0.0, 0.5, -1.0, 0.1]
+    sigmas = [1.0, 1.0, 2.0, 0.25, 0.37]
+    for k in range[len[seeds]]
+        drawn = rng.normal[rng.manual_seed[seeds[k]], sizes[k], mus[k], sigmas[k]]
+        out = push[out, floats_of['normal_`seeds[k]`_`sizes[k]`', drawn.values, 1.0]]
+    out = push[out, floats_of['normal_cached', normals[rng.manual_seed[6], [1, 20, 3, 2]], 1.0]]
+    out = push[out, floats_of['mixed_12', mixed[], 1.0]]
+    wrong = []
+    for line in out
+        if line ne ''
+            wrong = push[wrong, line]
+    return wrong
+
+test the_floats_are_torchs[]
+    float_disagreements[] eq []
+
+--- a generator is a value: drawing from it answers a new one, and the
+--- one drawn from draws the same numbers again
+test a_generator_draws_the_same_numbers_again[]
+    g = rng.manual_seed[2024]
+    first = rng.normal[g, 7].values
+    again = rng.normal[g, 7].values
+    first eq again
+    moved = rng.normal[g, 7].generator
+    not (rng.normal[moved, 7].values eq first)
+
+--- an init case's numbers, drawn by pie
+fn init_case[name]
+    if name eq 'init_uniform'
+        return math.flatten[init.uniform[rng.manual_seed[5], [3, 4], -0.5, 2.0].values]
+    if name eq 'init_normal'
+        return math.flatten[init.normal[rng.manual_seed[6], [100], 1.0, 2.0].values]
+    if name eq 'init_normal_7'
+        return math.flatten[init.normal[rng.manual_seed[6], [7], 1.0, 2.0].values]
+    if name eq 'init_xavier_uniform'
+        return math.flatten[init.xavier_uniform[rng.manual_seed[7], [20, 5]].values]
+    if name eq 'init_xavier_normal'
+        return math.flatten[init.xavier_normal[rng.manual_seed[8], [7, 3], 2.0].values]
+    if name eq 'init_kaiming_normal'
+        return math.flatten[init.kaiming_normal[rng.manual_seed[9], [10, 10], mode = 'fan_out', nonlinearity = 'relu'].values]
+    if name eq 'init_kaiming_uniform'
+        return math.flatten[init.kaiming_uniform[rng.manual_seed[10], [10, 25], 0.2].values]
+    if name eq 'init_trunc_normal'
+        return math.flatten[init.trunc_normal[rng.manual_seed[11], [50]].values]
+    if name eq 'init_trunc_normal_ab'
+        return math.flatten[init.trunc_normal[rng.manual_seed[12], [40], 0.5, 2.0, -1.0, 3.0].values]
+    if name eq 'init_orthogonal_tall'
+        return math.flatten[init.orthogonal[rng.manual_seed[13], [5, 3]].values]
+    if name eq 'init_orthogonal_wide'
+        return math.flatten[init.orthogonal[rng.manual_seed[14], [3, 5], 2.0].values]
+    if name eq 'init_orthogonal_kernel'
+        return math.flatten[init.orthogonal[rng.manual_seed[15], [4, 2, 3]].values]
+    if name eq 'init_sparse'
+        return math.flatten[init.sparse[rng.manual_seed[16], [10, 4], 0.3].values]
+    if name eq 'params_seq_1'
+        return nn.parameters[nn.sequential[[nn.linear[5, 4], nn.relu[], nn.linear[4, 3]]], rng.manual_seed[1]].values
+    if name eq 'params_mixed_2'
+        return nn.parameters[nn.sequential[[nn.embedding[3, 4], nn.linear[4, 2, bias = false], nn.layer_norm[[2]], nn.prelu[]]], rng.manual_seed[2]].values
+    if name eq 'params_bilinear_3'
+        return nn.parameters[nn.bilinear[3, 2, 4], rng.manual_seed[3]].values
+    return nn.parameters[nn.sequential[[nn.embedding[3, 3], nn.embedding[2, 3]]], rng.manual_seed[4]].values
+
+--- the init cases pie draws apart from torch, each with its distance
+fn init_disagreements[]
+    cases = frame.load['packages/nn/reference/expected/rng_init.csv']
+    out = []
+    for i in range[len[cases]]
+        name = str[cases.case[i]]
+        far = float[cases.within[i]]
+        got = init_case[name]
+        want = held.expected['rng_`name`']
+        gap = held.apart[got, want]
+        if far eq 1.0
+            gap = ulps_apart[got, want]
+        if gap gt far
+            out = push[out, '`name` `gap`']
+    return out
+
+test the_parameters_are_torchs[]
+    init_disagreements[] eq []

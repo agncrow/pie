@@ -1,0 +1,274 @@
+--- `use nn.safetensors`: tensors by name saved and loaded in the
+--- safetensors format (Hugging Face's, which PyTorch models are shared
+--- in): eight bytes of the header's length, little-endian; the header, a
+--- JSON object naming each tensor's dtype, shape and the bytes it takes,
+--- `__metadata__` first, padded with spaces to a multiple of eight; then
+--- the tensors' bytes, little-endian, one after another. A file pie saves
+--- is the file safetensors.torch.save_file writes of the same tensors in
+--- the same dtype, byte for byte: the tensors in the order of their names,
+--- the metadata's keys in theirs.
+---
+--- A pie tensor holds float64 numbers: a save writes them as F64, or as
+--- F32, F16, BF16 or I64 where `dtype` says, each number rounded as
+--- PyTorch's `.to(dtype)` of a float64 tensor rounds it, to nearest and
+--- ties to even (to half precision at once, to bfloat16 through single
+--- precision); a load reads every dtype the format has as float64 numbers —
+--- F64, F32, F16, BF16, I64, I32, I16, I8, U64, U32, U16, U8, BOOL. A
+--- tensor of no axes (shape []) loads as a vector of one number.
+---
+---     _saved = safetensors.save_file[nn.state[model, theta], 'model.safetensors']
+---     theta = nn.from_state[model, safetensors.load_file['model.safetensors']]
+use math as m
+use sys, bits
+use shapes
+
+--- a tensor the header names: its name, its dtype, its shape and where its
+--- bytes lie, from the end of the header
+struct Entry [name, dtype, shape, start, stop]
+
+--- a header read: its entries in the header's order, its metadata, and
+--- where the tensors' bytes start in the file
+struct Header [entries, metadata, offset]
+
+--- the bytes a number of each dtype takes
+fn width[dtype]
+    if dtype eq 'F64' or dtype eq 'I64' or dtype eq 'U64'
+        return 8
+    if dtype eq 'F32' or dtype eq 'I32' or dtype eq 'U32'
+        return 4
+    if dtype eq 'F16' or dtype eq 'BF16' or dtype eq 'I16' or dtype eq 'U16'
+        return 2
+    if dtype eq 'I8' or dtype eq 'U8' or dtype eq 'BOOL'
+        return 1
+    halt['safetensors: no dtype `dtype` (F64, F32, F16, BF16, I64, I32, I16, I8, U64, U32, U16, U8, BOOL)']
+
+--- save[state, dtype, metadata]: the bytes of the tensors by name
+--- (safetensors.torch.save): every tensor in `dtype`, metadata a map of
+--- text to text
+fn save[state, dtype = 'F64', metadata = map[]]
+    if not (dtype in ['F64', 'F32', 'F16', 'BF16', 'I64'])
+        halt['safetensors: pie saves F64, F32, F16, BF16 or I64, not `dtype`']
+    w = width[dtype]
+    pieces = []
+    data = sys.bytes[0]
+    at = 0
+    for name in keys[state]
+        t = state[name]
+        b = _encoded[m.flatten[t], dtype]
+        dims = []
+        for d in t.shape
+            dims = push[dims, str[d]]
+        pieces = push[pieces, '`encode[name]`:{"dtype":"`dtype`","shape":[`join[dims, \',\']`],"data_offsets":[`at`,`at + len[b]`]}']
+        data = sys.concat[data, b]
+        at = at + len[b]
+    if len[metadata] gt 0
+        pairs = []
+        for k in keys[metadata]
+            pairs = push[pairs, '`encode[k]`:`encode[str[metadata[k]]]`']
+        pieces = concat[['"__metadata__":{`join[pairs, \',\']`}'], pieces]
+    head = '{`join[pieces, \',\']`}'
+    hb = sys.bytes[head]
+    while len[hb] % 8 ne 0
+        hb = push[hb, 32]
+    return sys.concat[sys.concat[sys.pack[len[hb], 8, little = true], hb], data]
+
+--- save_file[state, path, dtype, metadata]: the bytes written to the file
+--- (safetensors.torch.save_file)
+fn save_file[state, path, dtype = 'F64', metadata = map[]]
+    return sys.store[path, save[state, dtype, metadata]]
+
+--- a tensor's numbers as the bytes of a dtype
+fn _encoded[t, dtype]
+    xs = for x in t
+        x
+    if dtype eq 'F64'
+        return sys.float_bytes[xs, 8, true]
+    out = sys.bytes[0]
+    if dtype eq 'I64'
+        for x in xs
+            if not (abs[x] lt 9223372036854775808.0) or x ne float[floor[x]]
+                halt['safetensors: `x` is no int64']
+            out = sys.concat[out, sys.pack[int[x], 8, little = true]]
+        return out
+    if dtype eq 'F16'
+        twos = []
+        s = 0.00006103515625
+        for k in range[31]
+            twos = push[twos, s]
+            s = s * 2.0
+        for x in xs
+            h = _half_of[x, twos]
+            out = push[push[out, bitand[h, 255]], shift[h, -8]]
+        return out
+    single = sys.float_bytes[xs, 4, true]
+    if dtype eq 'F32'
+        return single
+    for i in range[len[xs]]
+        h = _bfloat_bits[sys.unpack[single, 4 * i, 4, little = true, signed = false]]
+        out = push[push[out, bitand[h, 255]], shift[h, -8]]
+    return out
+
+--- a single's bits as bfloat16's, to nearest and ties to even (c10's
+--- round_to_nearest_even: PyTorch rounds a float64 to single precision
+--- first); a NaN is 0x7FC0
+fn _bfloat_bits[u]
+    if bitand[u, 2147483647] gt 2139095040
+        return 32704
+    return bitand[shift[u + 32767 + bitand[shift[u, -16], 1], -16], 65535]
+
+--- a float64 as half precision's bits, to nearest and ties to even, in
+--- one rounding as PyTorch's float64 to float16 rounds (a NaN is 0x7E00);
+--- `twos` holds 2^−14 to 2^16
+fn _half_of[x, twos]
+    if x ne x
+        return 32256
+    sign = 0
+    a = x
+    if x lt 0.0 or (x eq 0.0 and 1.0 / x lt 0.0)
+        sign = 32768
+        a = -x
+    if a lt 0.00006103515625
+        return bitor[sign, _even[a * 16777216.0]]
+    if a eq m.inf
+        return bitor[sign, 31744]
+    k = 0
+    while k lt 29 and a gte twos[k + 1]
+        k = k + 1
+    spelt = shift[k + 1, 10] + _even[(a / twos[k] - 1.0) * 1024.0]
+    if spelt gte 31744
+        return bitor[sign, 31744]
+    return bitor[sign, spelt]
+
+--- the whole number nearest a number of 0 or more, ties to the even one
+fn _even[r]
+    f = floor[r]
+    rest = r - float[f]
+    if rest gt 0.5 or (rest eq 0.5 and f % 2 eq 1)
+        return f + 1
+    return f
+
+--- header[given]: the bytes' header: its entries in order, its metadata
+fn header[given]
+    if len[given] lt 8
+        halt['safetensors: a file starts with 8 bytes of its header\'s length, and this one holds `len[given]`']
+    n = sys.unpack[given, 0, 8, little = true, signed = false]
+    if 8 + n gt len[given]
+        halt['safetensors: the header says it holds `n` bytes, past the file\'s `len[given]`']
+    return _read_header[sys.text[sys.slice[given, 8, 8 + n]], 8 + n]
+
+fn _read_header[head, offset]
+    j = json[head]
+    entries = []
+    meta = map[]
+    for name in keys[j]
+        v = j[name]
+        if name eq '__metadata__'
+            for k in keys[v]
+                meta[k] = str[v[k]]
+        else
+            dims = []
+            for d in v.shape
+                dims = push[dims, int[d]]
+            entries = push[entries, Entry[name, str[v.dtype], dims, int[v.data_offsets[0]], int[v.data_offsets[1]]]]
+    return Header[entries, meta, offset]
+
+--- load[given]: the tensors by name the bytes hold (safetensors.torch.load),
+--- each as float64 numbers laid in its shape
+fn load[given]
+    h = header[given]
+    out = map[]
+    for e in h.entries
+        out[e.name] = _tensor[e, sys.slice[given, h.offset + e.start, h.offset + e.stop]]
+    return out
+
+--- load_file[path]: the tensors by name a file holds
+--- (safetensors.torch.load_file)
+fn load_file[path]
+    return load[sys.file[path]]
+
+--- header_of_file[path]: a file's header alone, its tensors' bytes left
+--- unread (safe_open's keys and metadata)
+fn header_of_file[path]
+    head = sys.file[path, 0, 8]
+    n = sys.unpack[head, 0, 8, little = true, signed = false]
+    return _read_header[sys.text[sys.file[path, 8, n]], 8 + n]
+
+--- tensor_of_file[path, name]: one tensor of a file, the rest of its bytes
+--- left unread (safe_open's get_tensor)
+fn tensor_of_file[path, name]
+    h = header_of_file[path]
+    for e in h.entries
+        if e.name eq name
+            return _tensor[e, sys.file[path, h.offset + e.start, e.stop - e.start]]
+    halt['safetensors: no tensor `name` in `path`']
+
+--- an entry's bytes as its numbers, laid in its shape
+fn _tensor[e, b]
+    count = shapes.product[e.shape]
+    w = width[e.dtype]
+    if count * w ne len[b]
+        halt['safetensors: `e.name` takes `len[b]` bytes, and `count` numbers of `e.dtype` take `count * w`']
+    dims = e.shape
+    if len[dims] eq 0
+        dims = [1]
+    return shapes.laid[m.tensor[_numbers[b, e.dtype, count]], dims]
+
+fn _numbers[b, dtype, count]
+    if dtype eq 'F64'
+        return sys.float_values[b, 0, count, 8, true]
+    if dtype eq 'F32'
+        return sys.float_values[b, 0, count, 4, true]
+    out = []
+    if dtype eq 'F16' or dtype eq 'BF16'
+        scales = _scales[dtype]
+        for i in range[count]
+            h = sys.unpack[b, 2 * i, 2, little = true, signed = false]
+            out = push[out, _of_bits[h, dtype eq 'F16', scales]]
+        return out
+    w = width[dtype]
+    signed = starts[dtype, 'I']
+    for i in range[count]
+        out = push[out, float[sys.unpack[b, w * i, w, little = true, signed = signed]]]
+    return out
+
+--- 2^(e − 25) for half's exponents, 2^(e − 134) for bfloat16's, each
+--- made by halving or doubling, exactly
+fn _scales[dtype]
+    top = 31
+    low = 25
+    if dtype eq 'BF16'
+        top = 255
+        low = 134
+    out = []
+    for e in range[top + 1]
+        s = 1.0
+        if e lt low
+            for k in range[low - e]
+                s = s / 2.0
+        else
+            for k in range[e - low]
+                s = s * 2.0
+        out = push[out, s]
+    return out
+
+--- half's or bfloat16's bits as the number they spell
+fn _of_bits[h, half, scales]
+    s = 1.0
+    if bitand[h, 32768] ne 0
+        s = -1.0
+    e = bitand[shift[h, -10], 31]
+    f = bitand[h, 1023]
+    lead = 1024
+    top = 31
+    if not half
+        e = bitand[shift[h, -7], 255]
+        f = bitand[h, 127]
+        lead = 128
+        top = 255
+    if e eq top
+        if f ne 0
+            return m.nan
+        return s * m.inf
+    if e eq 0
+        return s * float[f] * scales[1]
+    return s * float[lead + f] * scales[e]

@@ -1,20 +1,15 @@
 --- nn.init held to PyTorch's torch.nn.init (reference/reference.py, torch
 --- 2.8): what PyTorch fixes — the gains, the fans, the identities, the
---- inverse error function — to the last digit or two, and the draws, which
---- are Crow's generator's, to their distributions (seeded, so each run
---- draws the same numbers): bounds, means and spreads.
+--- inverse error function — to the last digit or two; and what the draws
+--- make — a sparse matrix's zeros, an orthogonal matrix's rows. The draws
+--- themselves are torch's, number for number: held_rng.co holds them.
 use math, frame
 use nn
-use init
+use rng, init
 use held
 
 fn row[given]
     return math.tensor[given]
-
---- the standard deviation of a vector's numbers (the population's)
-fn spread[x]
-    d = x - mean[x]
-    return sqrt[mean[d .* d]]
 
 test the_fixed_values_are_pytorchs[]
     gains = row[[init.calculate_gain['linear'], init.calculate_gain['conv1d'], init.calculate_gain['sigmoid'], init.calculate_gain['tanh'], init.calculate_gain['relu'], init.calculate_gain['leaky_relu'], init.calculate_gain['selu'], init.calculate_gain['leaky_relu', 0.2]]]
@@ -32,40 +27,8 @@ test the_fixed_values_are_pytorchs[]
     math.flatten[init.constant[[2, 3], 0.25]] eq row[[0.25, 0.25, 0.25, 0.25, 0.25, 0.25]]
     init.zeros[[2, 2]].shape eq [2, 2]
 
-test the_draws_have_pytorchs_distributions[]
-    seed[5]
-    u = math.flatten[init.uniform[[100, 100], -0.5, 2.0]]
-    min[u] gte -0.5
-    max[u] lt 2.0
-    abs[mean[u] - 0.75] lt 0.03
-    n = math.flatten[init.normal[[100, 100], 1.0, 2.0]]
-    abs[mean[n] - 1.0] lt 0.06
-    abs[spread[n] - 2.0] lt 0.06
-    x = math.flatten[init.xavier_uniform[[200, 50]]]
-    bound = sqrt[6.0 / 250.0]
-    max[abs[x]] lte bound
-    max[abs[x]] gt 0.99 * bound
-    xn = math.flatten[init.xavier_normal[[200, 50], 2.0]]
-    abs[spread[xn] - 2.0 * sqrt[2.0 / 250.0]] lt 0.005
-    k = math.flatten[init.kaiming_normal[[100, 100], mode = 'fan_out', nonlinearity = 'relu']]
-    abs[spread[k] - sqrt[2.0 / 100.0]] lt 0.006
-    ku = math.flatten[init.kaiming_uniform[[100, 25], 0.2]]
-    max[abs[ku]] lte sqrt[3.0] * init.calculate_gain['leaky_relu', 0.2] / sqrt[25.0]
-    want = held.expected['init_trunc']
-    t = math.flatten[init.trunc_normal[[100, 100]]]
-    min[t] gte -2.0
-    max[t] lte 2.0
-    abs[mean[t] - want[0]] lt 0.03
-    abs[spread[t] - want[1]] lt 0.03
-    t2 = math.flatten[init.trunc_normal[[100, 100], 0.5, 2.0, -1.0, 3.0]]
-    min[t2] gte -1.0
-    max[t2] lte 3.0
-    abs[mean[t2] - want[2]] lt 0.04
-    abs[spread[t2] - want[3]] lt 0.04
-
 test a_sparse_matrix_has_its_zeros_in_every_column[]
-    seed[9]
-    s = init.sparse[[10, 4], 0.3]
+    s = init.sparse[rng.manual_seed[9], [10, 4], 0.3].values
     zeros_in = []
     for j in range[4]
         count = 0
@@ -76,20 +39,18 @@ test a_sparse_matrix_has_its_zeros_in_every_column[]
     zeros_in eq [3, 3, 3, 3]
 
 test an_orthogonal_matrix_is_orthonormal[]
-    seed[3]
-    tall = init.orthogonal[[5, 3]]
+    tall = math.reshape[init.orthogonal[rng.manual_seed[3], [5, 3]].values, 5, 3]
     max[abs[math.transpose[tall] * tall - math.eye[3]]] lt 0.000000000001
-    wide = init.orthogonal[[3, 5], 2.0]
+    wide = math.reshape[init.orthogonal[rng.manual_seed[4], [3, 5], 2.0].values, 3, 5]
     max[abs[wide * math.transpose[wide] - math.eye[3] * 4.0]] lt 0.000000000001
-    kernel = init.orthogonal[[4, 2, 3]]
+    kernel = init.orthogonal[rng.manual_seed[5], [4, 2, 3]].values
     kernel.shape eq [4, 2, 3]
     flat = math.reshape[kernel, 4, 6]
     max[abs[flat * math.transpose[flat] - math.eye[4]]] lt 0.000000000001
 
 test a_parameter_is_put_by_its_name[]
-    seed[1]
     model = nn.sequential[[nn.linear[5, 4], nn.relu[], nn.linear[4, 3]]]
-    theta = nn.parameters[model]
+    theta = nn.parameters[model, rng.manual_seed[1]].values
     given = init.constant[[3], 0.5]
     put = nn.with_param[model, theta, '2.bias', given]
     math.flatten[nn.param[model, put, '2.bias']] eq row[[0.5, 0.5, 0.5]]

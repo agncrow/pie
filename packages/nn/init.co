@@ -1,19 +1,24 @@
 --- `use nn.init`: PyTorch's torch.nn.init — the values a parameter starts
 --- from, each a tensor of the shape asked (a list of sizes, PyTorch's
---- order), drawn from the seeded generator. `nn.with_param` puts one in a
---- model's theta: `theta = nn.with_param[model, theta, '0.weight',
---- init.xavier_uniform[[4, 5]]]`. The draws are Crow's generator's, not
---- PyTorch's, so a seeded run repeats itself, not PyTorch's numbers; the
---- distributions, the bounds and the gains are PyTorch's. Every function is
---- PyTorch's of the same name less its trailing underscore (a pie function
---- answers a new tensor; nothing is written in place), with `mean` and
---- `std` spelled `mu` and `sigma` (a parameter is never named like a
---- builtin).
+--- order). A function that draws takes a generator (`nn.rng`) first and
+--- answers the tensor beside the generator past its draws (`Drawn`), the
+--- numbers PyTorch's function draws from that generator in float64
+--- (torch.set_default_dtype(torch.float64)); `nn.with_param` puts one in a
+--- model's theta: `w = init.xavier_uniform[g, [4, 5]]`, then
+--- `theta = nn.with_param[model, theta, '0.weight', w.values]`. Every
+--- function is PyTorch's of the same name less its trailing underscore (a
+--- pie function answers a new tensor; nothing is written in place), with
+--- `mean` and `std` spelled `mu` and `sigma` (a parameter is never named
+--- like a builtin).
 use math as m
 use shapes
+use rng
 
 --- a fan: the inputs and the outputs one number of a layer's weight meets
 struct Fans [ins, outs]
+
+--- a tensor drawn, laid in the shape asked, and the generator past it
+struct Drawn [values, generator]
 
 --- calculate_gain[nonlinearity, param]: the gain PyTorch scales an
 --- initialization by for the nonlinearity that follows (param a leaky
@@ -53,14 +58,16 @@ fn _fan[shape, mode]
 fn _shaped[flat, shape]
     return shapes.laid[flat, shape]
 
---- uniform[shape, a, b]: each number uniform on [a, b)
-fn uniform[shape, a = 0.0, b = 1.0]
-    return _shaped[m.uniform[a, b, shapes.product[shape]], shape]
+--- uniform[g, shape, a, b]: each number uniform on [a, b)
+fn uniform[g, shape, a = 0.0, b = 1.0]
+    d = rng.uniform[g, shapes.product[shape], a, b]
+    return Drawn[_shaped[d.values, shape], d.generator]
 
---- normal[shape, mu, sigma]: each number normal, of mean mu and standard
---- deviation sigma
-fn normal[shape, mu = 0.0, sigma = 1.0]
-    return _shaped[m.randn[shapes.product[shape]] * sigma + mu, shape]
+--- normal[g, shape, mu, sigma]: each number normal, of mean mu and
+--- standard deviation sigma
+fn normal[g, shape, mu = 0.0, sigma = 1.0]
+    d = rng.normal[g, shapes.product[shape], mu, sigma]
+    return Drawn[_shaped[d.values, shape], d.generator]
 
 --- constant[shape, value], ones[shape], zeros[shape]
 fn constant[shape, value]
@@ -115,28 +122,28 @@ fn dirac[shape, groups = 1]
         out = push[out, v]
     return _shaped[m.tensor[out], shape]
 
---- xavier_uniform[shape, gain] and xavier_normal[shape, gain]: Glorot's,
---- the standard deviation gain·√(2 / (fan in + fan out))
-fn xavier_uniform[shape, gain = 1.0]
+--- xavier_uniform[g, shape, gain] and xavier_normal[g, shape, gain]:
+--- Glorot's, the standard deviation gain·√(2 / (fan in + fan out))
+fn xavier_uniform[g, shape, gain = 1.0]
     f = fans[shape]
     sigma = gain * sqrt[2.0 / float[f.ins + f.outs]]
     bound = sqrt[3.0] * sigma
-    return uniform[shape, -bound, bound]
+    return uniform[g, shape, -bound, bound]
 
-fn xavier_normal[shape, gain = 1.0]
+fn xavier_normal[g, shape, gain = 1.0]
     f = fans[shape]
-    return normal[shape, 0.0, gain * sqrt[2.0 / float[f.ins + f.outs]]]
+    return normal[g, shape, 0.0, gain * sqrt[2.0 / float[f.ins + f.outs]]]
 
---- kaiming_uniform[shape, a, mode, nonlinearity] and kaiming_normal: He's,
---- the standard deviation gain / √fan, the fan in or the fan out
-fn kaiming_uniform[shape, a = 0.0, mode = 'fan_in', nonlinearity = 'leaky_relu']
+--- kaiming_uniform[g, shape, a, mode, nonlinearity] and kaiming_normal:
+--- He's, the standard deviation gain / √fan, the fan in or the fan out
+fn kaiming_uniform[g, shape, a = 0.0, mode = 'fan_in', nonlinearity = 'leaky_relu']
     sigma = calculate_gain[nonlinearity, a] / sqrt[float[_fan[shape, mode]]]
     bound = sqrt[3.0] * sigma
-    return uniform[shape, -bound, bound]
+    return uniform[g, shape, -bound, bound]
 
-fn kaiming_normal[shape, a = 0.0, mode = 'fan_in', nonlinearity = 'leaky_relu']
+fn kaiming_normal[g, shape, a = 0.0, mode = 'fan_in', nonlinearity = 'leaky_relu']
     sigma = calculate_gain[nonlinearity, a] / sqrt[float[_fan[shape, mode]]]
-    return normal[shape, 0.0, sigma]
+    return normal[g, shape, 0.0, sigma]
 
 --- the normal distribution's cumulative probability
 fn _cdf[x]
@@ -168,26 +175,29 @@ fn erfinv[y]
     x = x - (m.erf[x] - y) ./ (m.exp[-(x .* x)] * slope)
     return x
 
---- trunc_normal[shape, mu, sigma, a, b]: normal of mean mu and standard
---- deviation sigma, held to [a, b] — PyTorch's method: uniform between the
---- bounds' probabilities, through the inverse of the normal's
-fn trunc_normal[shape, mu = 0.0, sigma = 1.0, a = -2.0, b = 2.0]
+--- trunc_normal[g, shape, mu, sigma, a, b]: normal of mean mu and
+--- standard deviation sigma, held to [a, b] — PyTorch's method: uniform
+--- between the bounds' probabilities, through the inverse of the normal's
+--- (within 1e-11 of PyTorch's: erfinv says why)
+fn trunc_normal[g, shape, mu = 0.0, sigma = 1.0, a = -2.0, b = 2.0]
     lo = _cdf[(a - mu) / sigma]
     hi = _cdf[(b - mu) / sigma]
-    t = m.uniform[2.0 * lo - 1.0, 2.0 * hi - 1.0, shapes.product[shape]]
-    x = erfinv[t] * (sigma * sqrt[2.0]) + mu
-    return _shaped[m.clip[x, a, b], shape]
+    d = rng.uniform[g, shapes.product[shape], 2.0 * lo - 1.0, 2.0 * hi - 1.0]
+    x = erfinv[d.values] * (sigma * sqrt[2.0]) + mu
+    return Drawn[_shaped[m.clip[x, a, b], shape], d.generator]
 
---- orthogonal[shape, gain]: a matrix whose rows or columns (the fewer) are
---- orthonormal, times gain — the Q of a normal matrix's QR, its columns'
---- signs those of R's diagonal (a kernel's numbers past the first axis
---- are its columns)
-fn orthogonal[shape, gain = 1.0]
+--- orthogonal[g, shape, gain]: a matrix whose rows or columns (the fewer)
+--- are orthonormal, times gain — the Q of a normal matrix's QR, its
+--- columns' signs those of R's diagonal (a kernel's numbers past the first
+--- axis are its columns); PyTorch's QR is LAPACK's and pie's faer's, so
+--- the two agree to the last digit or two
+fn orthogonal[g, shape, gain = 1.0]
     if len[shape] lt 2
         halt['only tensors with 2 or more dimensions are supported']
     rows = shape[0]
     cols = shapes.product[shape] / rows
-    flat = m.randn[rows, cols]
+    d = rng.normal[g, rows * cols]
+    flat = m.reshape[d.values, rows, cols]
     wide = rows lt cols
     if wide
         flat = m.transpose[flat]
@@ -196,18 +206,26 @@ fn orthogonal[shape, gain = 1.0]
     q = parts[0] .* m.reshape[signs, 1, len[signs]]
     if wide
         q = m.transpose[q]
-    return _shaped[q * gain, shape]
+    return Drawn[_shaped[q * gain, shape], d.generator]
 
---- sparse[shape, sparsity, sigma]: a matrix normal of standard deviation
---- sigma with ⌈sparsity · rows⌉ of each column's numbers 0, the rows drawn
-fn sparse[shape, sparsity, sigma = 0.01]
+--- sparse[g, shape, sparsity, sigma]: a matrix normal of standard
+--- deviation sigma with ⌈sparsity · rows⌉ of each column's numbers 0, the
+--- rows a permutation's first, one permutation a column. PyTorch's
+--- sparse_ draws the permutations from the process's generator whatever
+--- generator it is handed, so g stands for both: the process's, as
+--- sparse_ draws given none
+fn sparse[g, shape, sparsity, sigma = 0.01]
     if len[shape] ne 2
         halt['only tensors with 2 dimensions are supported']
     rows = shape[0]
     cols = shape[1]
     count = int[ceil[sparsity * float[rows]]]
-    x = m.randn[rows, cols] * sigma
+    d = rng.normal[g, rows * cols, 0.0, sigma]
+    x = m.reshape[d.values, rows, cols]
+    at = d.generator
     for j in range[cols]
-        for i in m.choice[m.tensor[range[rows]], count]
-            x[int[i]][j] = 0.0
-    return x
+        perm = rng.randperm[at, rows]
+        at = perm.generator
+        for i in slice[perm.values, 0, count]
+            x[i][j] = 0.0
+    return Drawn[x, at]

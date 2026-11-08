@@ -1,0 +1,132 @@
+--- nn.safetensors held to Hugging Face's safetensors library (0.7,
+--- reference/safetensors_reference.py, torch 2.8): a state pie saves is
+--- the library's file of it, byte for byte, in F64 with metadata, F32,
+--- F16, BF16 and I64; every file the library wrote loads as the numbers
+--- torch reads from it, a tensor of each of the format's dtypes; and a
+--- model PyTorch made and saved runs in pie as it ran in PyTorch.
+use math, frame
+use sys
+use nn
+use safetensors, shapes
+
+fn numbers[given]
+    out = []
+    for piece in split[given, ' ']
+        if piece ne ''
+            out = push[out, float[piece]]
+    return out
+
+fn sizes[given]
+    out = []
+    for d in json[given]
+        out = push[out, int[d]]
+    return out
+
+--- the state the reference saved, read from its CSV
+fn given_state[]
+    rows = frame.load['packages/nn/reference/data/st_state.csv']
+    out = map[]
+    for i in range[len[rows]]
+        out[str[rows.name[i]]] = shapes.laid[math.tensor[numbers[str[rows.values[i]]]], sizes[str[rows.dims[i]]]]
+    return out
+
+fn whole_state[]
+    out = map[]
+    out['counts'] = math.tensor[[0.0, -1.0, 1099511627776.0, -9007199254740992.0, 7.0]]
+    out['steps'] = math.reshape[math.tensor[[3.0, 4.0]], 2, 1]
+    return out
+
+fn file_of[word]
+    return sys.file['packages/nn/reference/data/st_`word`.safetensors']
+
+fn digest[b]
+    return sys.hash[b, 'sha256']
+
+--- whether two lists of numbers are equal, a NaN equal to a NaN
+fn same[got, want]
+    if len[got] ne len[want]
+        return false
+    for i in range[len[got]]
+        a = got[i]
+        b = want[i]
+        if not (a eq b or (a ne a and b ne b))
+            return false
+    return true
+
+--- the tensors a file holds that are not the numbers the reference read
+--- from it
+fn load_disagreements[word]
+    loaded = safetensors.load[file_of[word]]
+    rows = frame.load['packages/nn/reference/expected/st_`word`.csv']
+    out = []
+    if len[keys[loaded]] ne len[rows]
+        out = push[out, '`word`: `len[keys[loaded]]` tensors, the reference `len[rows]`']
+    for i in range[len[rows]]
+        name = str[rows.name[i]]
+        if not (name in loaded)
+            out = push[out, '`word`: no `name`']
+        else
+            if not same[math.flatten[loaded[name]], numbers[str[rows.values[i]]]]
+                out = push[out, '`word`: `name`']
+    return out
+
+--- the dtypes whose file pie saves is not the library's
+fn save_disagreements[]
+    s = given_state[]
+    out = []
+    if digest[safetensors.save[s, 'F64', map[format = 'pt']]] ne digest[file_of['f64']]
+        out = push[out, 'F64']
+    for word in ['F32', 'F16', 'BF16']
+        if digest[safetensors.save[s, word]] ne digest[file_of[lower[word]]]
+            out = push[out, word]
+    if digest[safetensors.save[whole_state[], 'I64']] ne digest[file_of['i64']]
+        out = push[out, 'I64']
+    return out
+
+--- every file's tensors that load as other numbers than torch's
+fn every_load_disagreement[]
+    out = []
+    for word in ['f64', 'f32', 'f16', 'bf16', 'all']
+        out = concat[out, load_disagreements[word]]
+    return out
+
+--- how far the model torch saved, run in pie, is from torch's answer
+fn model_gap[]
+    model = nn.sequential[[nn.linear[3, 4], nn.tanh[], nn.linear[4, 2]]]
+    theta = nn.from_state[model, safetensors.load[file_of['model']]]
+    x = math.load['packages/nn/reference/data/st_model_x.csv']
+    y = math.flatten[nn.forward[model, theta, x]]
+    return max[abs[y - math.flatten[math.load['packages/nn/reference/expected/st_model_y.csv']]]]
+
+test pie_saves_the_librarys_bytes[]
+    save_disagreements[] eq []
+
+test pie_loads_what_the_library_saves[]
+    every_load_disagreement[] eq []
+    h = safetensors.header[file_of['f64']]
+    h.metadata['format'] eq 'pt'
+    len[h.entries] eq 4
+    safetensors.header[file_of['all']].metadata['note'] eq 'a tensor of each dtype'
+    path = 'packages/nn/reference/data/st_all.safetensors'
+    math.flatten[safetensors.tensor_of_file[path, 'f16']] eq math.tensor[[0.0999755859375, -65504.0, 0.00000005960464477539063, 1.0]]
+    len[safetensors.header_of_file[path].entries] eq 14
+    loaded = safetensors.load[file_of['i64']]
+    math.flatten[loaded['counts']] eq whole_state[]['counts']
+    loaded['steps'].shape eq [2, 1]
+
+--- a model PyTorch made and saved: pie reads its state into the same
+--- model and runs it on the input the reference ran it on
+test a_model_torch_saved_runs_in_pie_as_in_torch[]
+    model_gap[] lt 0.000000000000001
+    --- and what pie saves of it, the library's file of the same state
+    model = nn.sequential[[nn.linear[3, 4], nn.tanh[], nn.linear[4, 2]]]
+    theta = nn.from_state[model, safetensors.load[file_of['model']]]
+    digest[safetensors.save[nn.state[model, theta]]] eq digest[file_of['model']]
+
+--- a state saved and loaded again is itself
+test a_saved_state_loads_as_itself[]
+    s = given_state[]
+    back = safetensors.load[safetensors.save[s]]
+    same[math.flatten[back['edges']], math.flatten[s['edges']]]
+    back['emb.weight'].shape eq [2, 3, 2]
+    math.flatten[back['weight']] eq math.flatten[s['weight']]

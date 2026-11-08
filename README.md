@@ -31,7 +31,7 @@ deps = map[nn = 'github.com/agncrow/pie/packages/nn@v0.1.0']
 use math
 use nn
 use nn.functional as F
-use nn.optim
+use nn.optim, nn.rng
 
 fn loss[model, theta, x, y]
     return F.mse_loss[nn.forward[model, theta, x], y]
@@ -39,15 +39,21 @@ fn loss[model, theta, x, y]
 model = nn.sequential[[nn.linear[3, 4], nn.relu[], nn.linear[4, 1]]]
 x = tensor[[[1.0, 2.0, 3.0], [0.5, -1.0, 2.0]]]
 y = tensor[[[1.0], [0.0]]]
-opt = optim.sgd[nn.parameters[model], lr = 0.1]
+opt = optim.sgd[nn.parameters[model, rng.manual_seed[0]].values, lr = 0.1]
 for k in range[50]
     opt = optim.step[opt, grad[loss][model, opt.theta, x, y][0]]
 log[loss[model, opt.theta, x, y]]
 ```
 
 A model is a record of its layers beside one vector of parameters,
-`theta`; `grad[loss]` answers the gradient of every parameter at once, and
-an optimiser's step is arithmetic over that vector.
+`theta`, drawn from a torch generator (`nn.rng`) as PyTorch's modules draw
+it — the same numbers, after `torch.manual_seed(0)` in float64; `grad[loss]`
+answers the gradient of every parameter at once, and an optimiser's step is
+arithmetic over that vector. The same model and steps in PyTorch, in
+float64 from `torch.manual_seed(0)`, end at the loss this prints to twelve
+digits. A loader (`nn.data`) hands out PyTorch's
+batches in PyTorch's order, and `nn.safetensors` saves and loads weights in
+the format PyTorch models are shared in.
 
 `./test.sh [crow]` runs every package's tests and examples in both modes.
 [docs/pie-design.md](docs/pie-design.md) says where the line with crow

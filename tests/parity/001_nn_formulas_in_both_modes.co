@@ -6,6 +6,7 @@
 use math
 use nn
 use nn.functional as F
+use nn.rng
 
 log[F.relu[[-1.0, 0.5, 2.0]]]
 log[F.sigmoid[[0.0]]]
@@ -44,13 +45,12 @@ log[fmt[flatten[gc[0]][1], decimals = 6]]
 log[fmt[flatten[gc[0]][5], decimals = 6]]
 
 --- and through a model's layers: its parameters drawn as PyTorch draws
---- them, from the seeded generator both modes share
+--- them, from a torch generator seeded alike in both modes
 fn fitted[model, theta, x, y]
     return F.mse_loss[flatten[nn.forward[model, theta, x]], y]
 
-seed[4]
 model = nn.sequential[[nn.linear[2, 3], nn.tanh[], nn.linear[3, 1]]]
-theta = nn.parameters[model]
+theta = nn.parameters[model, rng.manual_seed[4]].values
 log[nn.size[model]]
 g = grad[fitted][model, theta, tensor[x], tensor[y]]
 log[len[g[0]] eq len[theta]]

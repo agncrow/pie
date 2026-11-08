@@ -418,11 +418,9 @@ with open(os.path.join(HERE, 'expected/models.csv'), 'w', newline='') as f:
 
 # ---- nn.init: what is fixed of it --------------------------------------
 #
-# The draws are Crow's generator's, so only what PyTorch fixes is written:
-# the gains, the fans, the identities (dirac, eye), the inverse error
-# function trunc_normal draws through, and a truncated normal's mean and
-# standard deviation (held.co's draws are held to them).
-import math
+# What PyTorch fixes: the gains, the fans, the identities (dirac, eye) and
+# the inverse error function trunc_normal draws through. The draws
+# themselves are torch's generator's, held by rng_reference.py.
 import torch.nn.init as tinit
 
 gains = [tinit.calculate_gain(n) for n in ['linear', 'conv1d', 'sigmoid', 'tanh', 'relu', 'leaky_relu', 'selu']]
@@ -440,17 +438,4 @@ ys = [-0.999, -0.9, -0.5, -1e-8, 0.0, 1e-6, 0.3, 0.7, 0.95, 0.999999]
 write('data/init_ys.csv', [ys])
 write('expected/init_erfinv.csv', [torch.erfinv(torch.tensor(ys)).tolist()])
 
-
-def truncated(mu, sigma, a, b):
-    # the mean and standard deviation of a normal held to [a, b]
-    phi = lambda z: math.exp(-z * z / 2) / math.sqrt(2 * math.pi)
-    cdf = lambda z: (1 + math.erf(z / math.sqrt(2))) / 2
-    al, be = (a - mu) / sigma, (b - mu) / sigma
-    z = cdf(be) - cdf(al)
-    mean = mu + (phi(al) - phi(be)) / z * sigma
-    var = sigma * sigma * (1 + (al * phi(al) - be * phi(be)) / z - ((phi(al) - phi(be)) / z) ** 2)
-    return [mean, math.sqrt(var)]
-
-
-write('expected/init_trunc.csv', [truncated(0.0, 1.0, -2.0, 2.0) + truncated(0.5, 2.0, -1.0, 3.0)])
 print('%d cases and %d models, torch %s' % (len(cases), len(models), torch.__version__))
