@@ -11,9 +11,8 @@ follows: PyTorch in float64, scikit-learn, scipy, networkx, faiss.
 
 > **Alpha.** Pie is open source under the MIT or Apache-2.0 licence, at
 > your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)).
-> It runs on a crow newer than 0.8.2: crow's next release carries the
-> fixes Pie's packages need, and Pie's first tag, the `v0.1.0` below,
-> comes with it. Pie takes no pull requests during the alpha, and bug
+> It needs crow 0.9.0 or later, the first release with the fixes Pie's
+> packages need. Pie takes no pull requests during the alpha, and bug
 > reports are welcome in Issues ([CONTRIBUTING](CONTRIBUTING.md)).
 
 | Package | What it is |
